@@ -22,6 +22,39 @@ DSH 内核（@deepseek-ai/dsh）与 Node.js 完整内置，首次启动自动部
 - **前端**：React 18 + TypeScript + Vite
 - **包管理**：pnpm
 
+## 安装包下载
+
+> 面向终端用户。下载即用，无需安装 Node.js，无需网络。
+
+### 下载地址
+
+发布版安装包位于 [Releases 页面](https://gitee.com/scrm/iyam-dsh-desktop/releases)，按操作系统选择对应文件：
+
+| 平台 | 安装包 | 说明 |
+| --- | --- | --- |
+| macOS（Apple Silicon） | `iyam-dsh_<版本>_aarch64.dmg` | 拖入「应用程序」即可 |
+| macOS（Intel） | `iyam-dsh_<版本>_x64.dmg` | 同上 |
+| Windows 10/11（x64） | `iyam-dsh_<版本>_x64-setup.exe` | 双击安装 |
+| Linux（x64） | `iyam-dsh_<版本>_amd64.AppImage` | `chmod +x` 后运行 |
+
+### 系统要求
+
+- macOS 10.15+ / Windows 10 1803+ / 主流 Linux 发行版
+- 磁盘剩余空间 ≥ 1GB（应用包 ~460MB，解压部署后共约 800MB）
+- **不需要** 预先安装 Node.js 或 npm
+
+### 首次启动
+
+1. 双击应用，会短暂显示「正在安装 DeepSeek Harness…」（从内置资源部署到 `~/.iyam-dsh/`，约 5~10 秒，**无需网络**）
+2. 安装完成后自动启动 DSH 并加载 Web UI
+3. 后续启动秒开，直接复用本地安装
+
+### 常见问题
+
+- **macOS 提示"无法验证开发者"**：应用尚未签名公证。首次打开请右键点击图标 → 「打开」；正式发布后会提供签名版本
+- **Windows 提示 SmartScreen**：点击「更多信息」→「仍要运行」
+- **卸载**：删除应用 + 删除 `~/.iyam-dsh/` 目录即可完全清除
+
 ## 快速开始
 
 ### 开发调试
