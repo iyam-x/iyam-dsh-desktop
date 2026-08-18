@@ -219,12 +219,101 @@ pnpm tauri dev          # 启动开发服务器 + Tauri 窗口
 pnpm tauri build
 # 产物位置：
 #   macOS:  src-tauri/target/release/bundle/macos/iyam-dsh.app
-#   Windows: src-tauri/target/release/bundle/nsis/iyam-dsh_0.1.0_x64-setup.exe
-#   Linux:   src-tauri/target/release/bundle/appimage/iyam-dsh_0.1.0_amd64.AppImage
+#           src-tauri/target/release/bundle/dmg/iyam-dsh_<版本>_aarch64.dmg
+#   Windows: src-tauri/target/release/bundle/nsis/iyam-dsh_<版本>_x64-setup.exe
+#   Linux:   src-tauri/target/release/bundle/appimage/iyam-dsh_<版本>_amd64.AppImage
 ```
 
+### Release 打包发布操作步骤
+
+> Tauri 不支持跨平台交叉打包，**每个平台必须在对应系统上构建**（macOS 包只能在 macOS 上出，Windows 包只能在 Windows 上出）。
+
+#### 0. 发布前检查清单
+
+- [ ] `pnpm fetch:node --target <当前平台>` 已执行，`src-tauri/bin/node/<平台>/node` 存在
+- [ ] 内置 DSH 包 `src-tauri/bin/dsh-package/` 存在（.gitignore 排除，需手动放置）
+- [ ] `pnpm tauri dev` 完整流程通过（安装 → 启动 → DSH Web UI 可访问）
+- [ ] `~/.iyam-dsh` 有测试产生的配置时，确认不影响发布验证（可临时 `rm -rf ~/.iyam-dsh`）
+
+#### 1. 版本号统一（三处保持一致）
+
+```bash
+# 同步修改 version 为同一值（如 0.2.0）：
+#   - package.json      → "version"
+#   - src-tauri/Cargo.toml → [package] version
+#   - src-tauri/tauri.conf.json → "version"
+# 修改后提交一个 chore commit，如：chore: bump version to 0.2.0
+```
+
+#### 2. 构建 macOS 包（在 macOS 上执行）
+
+```bash
+pnpm fetch:node --target darwin-arm64   # Apple Silicon
+pnpm tauri build
+# 产物：bundle/dmg/iyam-dsh_<版本>_aarch64.dmg
+```
+
+Intel Mac 构建时改用 `--target darwin-x64`，产物为 `_x64.dmg`。
+
+#### 3. 构建 Windows 包（在 Windows 上执行）
+
+```powershell
+pnpm install
+pnpm fetch:node --target win32-x64
+pnpm tauri build
+# 产物：bundle/nsis/iyam-dsh_<版本>_x64-setup.exe
+```
+
+#### 4. 构建 Linux 包（在 Linux 上执行）
+
+```bash
+pnpm install
+pnpm fetch:node --target linux-x64
+pnpm tauri build
+# 产物：bundle/appimage/iyam-dsh_<版本>_amd64.AppImage
+# 若缺 AppImage 依赖，先安装：libfuse2、libwebkit2gtk-4.1-dev 等
+```
+
+#### 5. macOS 签名与公证（可选但建议）
+
+未签名版本用户会看到"无法验证开发者"提示（需右键打开）。正式分发建议：
+
+```bash
+# 1) Apple Developer 账号配置环境变量
+export APPLE_ID="your@email.com"
+export APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"
+export APPLE_TEAM_ID="XXXXXXXXXX"
+export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+
+# 2) tauri.conf.json 的 bundle.macOS 增加：
+#   "signingIdentity": "Developer ID Application: Your Name (TEAMID)"
+#   "dmg": { "sign": true }, "app": { "hardenedRuntime": true }
+
+# 3) 重新构建即自动签名 + 公证
+pnpm tauri build
+```
+
+> 注意：内置 node 二进制为 Node.js 官方签名，公证一般可正常通过；如被拒，需在公证前对 node 二进制做 `codesign --force --deep` 重新签名。
+
+#### 6. 上传发布到 Gitee Releases
+
+1. 访问 https://gitee.com/scrm/iyam-dsh-desktop/releases → 「新建发行版」
+2. 填写：版本号（Tag 与 `tauri.conf.json` 一致）、Release 标题（如 `v0.2.0`）、更新说明
+3. 上传产物：
+   - macOS: `iyam-dsh_<版本>_aarch64.dmg`（+ `_x64.dmg` 若有）
+   - Windows: `iyam-dsh_<版本>_x64-setup.exe`
+   - Linux: `iyam-dsh_<版本>_amd64.AppImage`
+4. 若为预发布，勾选「预发布」；正式版发布时取消勾选
+
+#### 7. 发布后验证
+
+- [ ] 从 Releases 下载各平台安装包，在干净环境安装
+- [ ] 首次启动：断网安装验证（内置部署、无需网络）
+- [ ] 验证 `~/.iyam-dsh/bin/dsh --version` 可手动执行
+- [ ] README「安装包下载」表格中的文件名与实际产物一致
+
 ### CI/CD（可选）
-GitHub Actions 自动触发构建，上传到 GitHub Releases。
+GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在 CI 中执行对应平台的 `pnpm fetch:node --target`。
 
 ---
 
