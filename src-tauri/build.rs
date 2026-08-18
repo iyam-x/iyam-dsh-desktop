@@ -3,8 +3,13 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    // 关键：必须先执行 tauri-build，生成 ACL manifest / capabilities 并嵌入二进制。
+    // 缺失会导致所有核心权限（event/window 等）报 "Plugin not found"。
+    tauri_build::build();
+
     // Tell cargo to rerun this script when bundled resources change
     println!("cargo:rerun-if-changed=bin/dsh-package");
+    println!("cargo:rerun-if-changed=bin/dsh-shell-plugin");
     println!("cargo:rerun-if-changed=bin/node");
     println!("cargo:rerun-if-changed=tauri.conf.json");
 
@@ -23,6 +28,16 @@ fn main() {
         });
     } else {
         println!("cargo:warning=WARNING: bin/dsh-package not found, DSH will not be bundled");
+    }
+
+    // 桌面壳 companion 插件（注入 DSH 布局 CSS）
+    let shell_src = Path::new("bin/dsh-shell-plugin");
+    if shell_src.exists() {
+        println!("cargo:warning=Bundling shell plugin into app resources");
+        copy_dir_all(shell_src, &dest_path.parent().unwrap().join("dsh-shell-plugin"))
+            .unwrap_or_else(|e| panic!("Failed to copy shell plugin to app resources: {}", e));
+    } else {
+        println!("cargo:warning=WARNING: bin/dsh-shell-plugin not found, shell plugin will not be bundled");
     }
 
     // 只复制当前编译目标平台的 node 运行时

@@ -2,6 +2,7 @@ use tauri::generate_handler;
 mod installer;
 mod process;
 mod updater;
+mod window;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -16,6 +17,7 @@ fn main() {
             process::start_dsh,
             process::stop_dsh,
             updater::check_for_update,
+            window::show_system_menu,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

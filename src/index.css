@@ -20,6 +20,12 @@ body,
   overflow: hidden;
 }
 
+.app-shell {
+  height: 100%;
+  width: 100%;
+  position: relative;
+}
+
 .app {
   height: 100%;
   width: 100%;
@@ -27,6 +33,70 @@ body,
   align-items: center;
   justify-content: center;
   background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+}
+
+/* ── 透明悬浮标题栏 ──
+   不占布局空间（position absolute），内容全屏；
+   仅作为拖拽区域 + 窗口控制层，视觉上完全透明。 */
+
+.title-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  background: transparent;
+}
+
+.title-bar-controls {
+  display: flex;
+  height: 100%;
+  margin-left: auto;
+}
+
+.tb-btn {
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, color 0.12s;
+}
+
+.tb-icon {
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 10px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.tb-btn:hover {
+  background: rgba(148, 163, 184, 0.12);
+  color: #e2e8f0;
+}
+
+.tb-btn:active {
+  background: rgba(148, 163, 184, 0.2);
+}
+
+.tb-close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.tb-close:active {
+  background: #bf0f1d;
+  color: #fff;
 }
 
 /* Loading / Installing state */

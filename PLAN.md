@@ -354,3 +354,36 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 | Windows WebView2 版本过旧 | 渲染异常 | 启动时检测 WebView2 版本，不足则引导安装 |
 | 包体过大（~460MB） | 分发/下载慢 | 单平台构建，仅内置当前平台 node |
 | DSH 新版本的 breaking change | 兼容性问题 | 保持对最新版 dsh 的测试覆盖 |
+
+---
+
+## 十一、问题记录与经验教训
+
+### 1. build.rs 必须调用 `tauri_build::build()`（严重）
+
+- **症状**：所有核心权限（`event.listen` / `window.start_dragging` 等）报 `not allowed. Plugin not found`；应用自定义命令正常（App 命令在无 ACL manifest 时跳过校验）。
+- **根因**：本项目 build.rs 被写成纯资源复制脚本，**从未调用 `tauri_build::build()`**。导致 ACL manifest / capabilities 未生成，`generate_context!` 嵌入空 ACL，核心插件权限全部缺失。
+- **修复**：build.rs 开头 `tauri_build::build();`（2018-08-19）。
+- **经验**：Tauri v2 项目 build.rs 永远以 `tauri_build::build()` 开头，自定义逻辑追加在其后。
+
+### 2. DSH 布局 CSS 注入机制（自定义 client 插件）
+
+- DSH 的"主题插件"只支持**颜色 token**（CSS 变量），无法做布局调整。
+- 布局 CSS 需通过 **client 插件**注入：
+  - 包结构：`package.json` 带 `dsh.bundle.patch`（指向 `cordis.patch.yml`）+ `dsh.client.platform: "web"` + `./client` export。
+  - `cordis.patch.yml` 用 `- insert: [{ id, name }]` 注册插件行。
+  - 安装：包复制到 `<DSH_HOME>/node_modules/@iyam/dsh-desktop-shell`，并注册到 `<DSH_HOME>/profiles/web/package.json` 的 `dsh.profile.bundles`（幂等）。
+  - **关键**：dsh 的 `initProfile` 不覆盖已存在的 manifest，因此首次安装时由 installer 预创建 `profiles/web/package.json`，dsh 启动即采用我们的 bundles。
+  - client.js 需用 `window.__ModuleLoader__.load({ id, factory })` 格式，factory 导出 `{ name, inject, apply }`，在 `apply` 中注入 `<style>`。
+- **选择器坑**：macOS 侧栏是 `[data-slot="sidebar"]`（不是 data-side），且该元素 `display: contents`（无盒模型，margin/padding 不生效），需作用到 `[data-slot="sidebar"] > :first-child`。
+
+### 3. macOS 自定义标题栏
+
+- 窗口配置：`titleBarStyle: "Overlay"` + `hiddenTitle: true` + `transparent: true` + `macOSPrivateApi: true`（保留原生红绿灯，内容全屏）。
+- 透明悬浮层（position absolute + z-index）承载拖拽/双击/右键菜单；iframe 不覆盖悬浮层。
+- **权限**：`toggleMaximize` 不在 `core:window:default` 里，需显式加 `core:window:allow-toggle-maximize`；`startDragging` 同理不在默认集，需 `core:window:allow-start-dragging`。
+- **失焦/聚焦差异**：窗口失焦时首击可拖（macOS 焦点点击直通 webview）；聚焦时原生标题栏可能吞掉点击——若拖拽失效，优先查权限/原生标题栏拦截。
+
+### 4. Dev 模式资源定位
+
+- `tauri dev` 的 cwd 是 `src-tauri/`，源码树回退需同时尝试 `cwd/src-tauri/bin/...` 与 `cwd/bin/...`；生产用 `resource_dir()`；dev 用 exe 同级（build.rs 复制到 `target/{profile}/`）。

@@ -26,6 +26,8 @@
 
 ## 编码规范
 
+- **`src-tauri/build.rs` 必须以 `tauri_build::build()` 开头**，自定义资源复制逻辑追加在其后。缺失会导致 ACL manifest 未生成、所有核心权限报 "Plugin not found"（详见 PLAN.md「问题记录」第 1 条）。
+
 \[引用项目中的编码规范文件，或简述关键约定\]
 
 * * *

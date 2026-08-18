@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
+import { TitleBar } from "./components/TitleBar";
 import "./App.css";
 
 type AppStatus = "installing" | "loading" | "ready" | "error";
@@ -84,16 +85,19 @@ export default function App() {
 
   if (state.status === "error") {
     return (
-      <div className="app error">
-        <div className="error-card">
-          <div className="error-icon">⚠</div>
-          <h2>启动失败</h2>
-          <p className="error-msg">{state.error || state.message}</p>
-          <button onClick={() => window.location.reload()}>重试</button>
-          <p className="error-hint">
-            也可手动在终端运行：
-            <code>~/.iyam-dsh/bin/dsh web</code>
-          </p>
+      <div className="app-shell">
+        <TitleBar />
+        <div className="app error">
+          <div className="error-card">
+            <div className="error-icon">⚠</div>
+            <h2>启动失败</h2>
+            <p className="error-msg">{state.error || state.message}</p>
+            <button onClick={() => window.location.reload()}>重试</button>
+            <p className="error-hint">
+              也可手动在终端运行：
+              <code>~/.iyam-dsh/bin/dsh web</code>
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -101,13 +105,16 @@ export default function App() {
 
   if (state.status === "installing") {
     return (
-      <div className="app installing">
-        <div className="install-card">
-          <div className="spinner" />
-          <h2>正在安装 DeepSeek Harness</h2>
-          <p>{state.message}</p>
-          <div className="install-tip">
-            正在从内置资源部署（约 300MB），无需网络，请耐心等待...
+      <div className="app-shell">
+        <TitleBar />
+        <div className="app installing">
+          <div className="install-card">
+            <div className="spinner" />
+            <h2>正在安装 DeepSeek Harness</h2>
+            <p>{state.message}</p>
+            <div className="install-tip">
+              正在从内置资源部署（约 300MB），无需网络，请耐心等待...
+            </div>
           </div>
         </div>
       </div>
@@ -116,11 +123,14 @@ export default function App() {
 
   if (state.status === "loading") {
     return (
-      <div className="app loading">
-        <div className="install-card">
-          <div className="spinner" />
-          <h2>正在启动 DeepSeek Harness</h2>
-          <p>{state.message}</p>
+      <div className="app-shell">
+        <TitleBar />
+        <div className="app loading">
+          <div className="install-card">
+            <div className="spinner" />
+            <h2>正在启动 DeepSeek Harness</h2>
+            <p>{state.message}</p>
+          </div>
         </div>
       </div>
     );
@@ -128,12 +138,15 @@ export default function App() {
 
   // Ready — embed DSH web UI
   return (
-    <div className="app ready">
-      <iframe
-        src={`http://127.0.0.1:${state.port}`}
-        title="DeepSeek Harness"
-        className="webview"
-      />
+    <div className="app-shell">
+      <TitleBar />
+      <div className="app ready">
+        <iframe
+          src={`http://127.0.0.1:${state.port}`}
+          title="DeepSeek Harness"
+          className="webview"
+        />
+      </div>
     </div>
   );
 }

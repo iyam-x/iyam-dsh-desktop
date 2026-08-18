@@ -1,0 +1,5 @@
+# iyam-dsh 桌面壳 companion 插件：作为 web profile 的一个 bundle 行被加载。
+# 服务端为 no-op，实际逻辑在 client.js（向 DSH web UI 注入平台布局 CSS）。
+- insert:
+    - id: dsh-desktop-shell
+      name: '@iyam/dsh-desktop-shell'

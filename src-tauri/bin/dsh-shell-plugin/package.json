@@ -1,0 +1,28 @@
+{
+  "name": "@iyam/dsh-desktop-shell",
+  "description": "iyam-dsh 桌面壳 companion：按平台注入布局 CSS，避让原生窗口控件（macOS 红绿灯 / Windows 窗口按钮）",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  }
+}
