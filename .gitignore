@@ -1,0 +1,8 @@
+node_modules/
+.pnpm-store/
+dist/
+src-tauri/target/
+src-tauri/bin/dsh-package/
+src-tauri/bin/node/
+*.log
+.DS_Store
