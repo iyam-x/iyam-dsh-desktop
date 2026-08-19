@@ -10,6 +10,7 @@ fn main() {
     // Tell cargo to rerun this script when bundled resources change
     println!("cargo:rerun-if-changed=bin/dsh-package");
     println!("cargo:rerun-if-changed=bin/dsh-shell-plugin");
+    println!("cargo:rerun-if-changed=bin/dsh-rtui-ui");
     println!("cargo:rerun-if-changed=bin/node");
     println!("cargo:rerun-if-changed=tauri.conf.json");
 
@@ -38,6 +39,16 @@ fn main() {
             .unwrap_or_else(|e| panic!("Failed to copy shell plugin to app resources: {}", e));
     } else {
         println!("cargo:warning=WARNING: bin/dsh-shell-plugin not found, shell plugin will not be bundled");
+    }
+
+    // 主题 UI 插件（注入 DSH web UI 主题 token + 设置面板）
+    let rtui_src = Path::new("bin/dsh-rtui-ui");
+    if rtui_src.exists() {
+        println!("cargo:warning=Bundling rtui-ui plugin into app resources");
+        copy_dir_all(rtui_src, &dest_path.parent().unwrap().join("dsh-rtui-ui"))
+            .unwrap_or_else(|e| panic!("Failed to copy rtui-ui plugin to app resources: {}", e));
+    } else {
+        println!("cargo:warning=WARNING: bin/dsh-rtui-ui not found, rtui-ui plugin will not be bundled");
     }
 
     // 只复制当前编译目标平台的 node 运行时

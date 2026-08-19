@@ -1,0 +1,5 @@
+# iyam-dsh 主题插件：作为 web profile 的一个 bundle 被加载。
+# 服务端 node 半边仅注册设置命名空间，实际逻辑在 client.js（注入主题 token + 设置面板）。
+- insert:
+    - id: dsh-rtui-ui
+      name: '@iyam/dsh-rtui-ui'

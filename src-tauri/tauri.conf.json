@@ -38,7 +38,9 @@
     "resources": [
       "bin/dsh-package",
       "bin/dsh-shell-plugin",
-      "bin/node"
+      "bin/dsh-rtui-ui",
+      "bin/node",
+      "icons"
     ]
   }
 }

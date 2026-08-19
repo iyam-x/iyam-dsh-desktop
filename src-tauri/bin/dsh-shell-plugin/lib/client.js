@@ -5,7 +5,7 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 
 		const name = "dsh-desktop-shell";
-		const inject = [];
+		const inject = ["sessions"];
 
 		function apply(ctx) {
 			// 注入平台布局 CSS：避让原生窗口控件
@@ -28,39 +28,69 @@ ${isMac ? "" : `
 `;
 			document.head.appendChild(style);
 
-			// 原生通知桥：agent 回合结束（completed / max-tokens / error）时通知宿主，
-			// 由宿主（Tauri 父页面）在窗口未聚焦时弹系统通知。
-			// 服务不可用时静默降级，不影响布局注入。
-			try {
-				ctx.conversationEvents.register({
-					kind: "dsh-desktop-turn-end",
-					match(event) {
-						if (event.type === "turn/end") {
-							return { id: String(event.data.turn), role: "start" };
-						}
-						return null;
-					},
-					start(_context, match) {
-						const reason = match.event.data.reason.kind;
-						if (reason === "completed" || reason === "max-tokens" || reason === "error") {
-							try {
-								window.parent?.postMessage(
-									{ source: "iyam-dsh-shell", type: "turn-end", reason },
-									"*"
-								);
-							} catch (_e) {
-								// 静默
-							}
-						}
-						return {};
-					},
-					update() {
-						return {};
-					},
-				});
-			} catch (_e) {
-				// 静默：运行时未提供 conversationEvents 时不启用通知桥
+			// 会话通知桥：监听会话 running 边沿（true→false = 对话完成），以及
+			// pendingInteraction 出现（等待授权/审阅/回复），经 postMessage 转发给
+			// 桌面壳，由宿主在窗口未聚焦时弹系统通知。
+			// 方案与 dsh-rtui 验证过的 notify 插件一致：订阅 sessions.list 快照，
+			// 首帧仅建基线，之后 running true→false 或 pending 出现才通知。
+			const sessions = ctx.sessions;
+			if (!sessions || !sessions.list) {
+				// 运行时未提供 sessions 时不启用通知桥
+				return;
 			}
+
+			const PENDING_LABEL = {
+				approval: "等待你的授权",
+				"plan-review": "等待你审阅计划",
+				question: "等待你的回复",
+			};
+
+			function notify(title, body) {
+				try {
+					window.parent?.postMessage(
+						{ source: "iyam-dsh-shell", type: "turn-end", reason: body, title },
+						"*"
+					);
+				} catch (_e) {
+					// 静默
+				}
+			}
+
+			ctx.effect(() => {
+				let prev = new Map();
+				const unsub = sessions.list.subscribe(() => {
+					let snap;
+					try {
+						snap = sessions.list.getSnapshot();
+					} catch (_e) {
+						return;
+					}
+					const ids = (snap && snap.ids) || [];
+					const byId = (snap && snap.byId) || {};
+					const cur = new Map();
+					for (const id of ids) {
+						const s = byId[id];
+						if (!s) continue;
+						cur.set(id, { running: !!s.running, pending: s.pendingInteraction || "" });
+					}
+					for (const [id, st] of cur) {
+						const old = prev.get(id);
+						prev.set(id, st);
+						if (!old) continue; // 基线帧，不通知
+						const display = (byId[id] && byId[id].displayTitle) ? byId[id].displayTitle : id;
+						if (old.running && !st.running) {
+							notify("DeepSeek Harness", `${display} 已完成回复`);
+						} else if (!old.pending && st.pending) {
+							const label = PENDING_LABEL[st.pending] || "等待你的输入";
+							notify("DeepSeek Harness", `${display} — ${label}`);
+						}
+					}
+					for (const id of prev.keys()) {
+						if (!cur.has(id)) prev.delete(id);
+					}
+				});
+				return unsub;
+			}, "iyam-dsh-shell: sessions watcher");
 		}
 
 		exports.name = name;

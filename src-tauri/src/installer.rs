@@ -153,6 +153,34 @@ pub(crate) fn bundled_shell_plugin(app: &tauri::AppHandle) -> Option<PathBuf> {
     None
 }
 
+/// 定位 bundle 内的主题 UI 插件包（注入 DSH web UI 主题 token + 设置面板）。
+/// 与 dsh-shell-plugin 不同：client 入口在根目录 client.js（非 lib/client.js）。
+pub(crate) fn bundled_rtui_ui_plugin(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // 1. Production: <app>/Contents/Resources/bin/dsh-rtui-ui
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let candidate = res_dir.join("bin").join("dsh-rtui-ui");
+        if candidate.join("client.js").exists() && candidate.join("package.json").exists() {
+            return Some(candidate);
+        }
+    }
+    // 2. Dev build: build.rs 复制到 exe 同级 target/{profile}/dsh-rtui-ui
+    if let Some(candidate) = exe_dir_candidate("dsh-rtui-ui", |p| p.join("client.js").exists() && p.join("package.json").exists()) {
+        return Some(candidate);
+    }
+    // 3. 源码树回退（cwd 可能是项目根或 src-tauri）
+    if let Ok(cwd) = env::current_dir() {
+        for candidate in [
+            cwd.join("src-tauri").join("bin").join("dsh-rtui-ui"),
+            cwd.join("bin").join("dsh-rtui-ui"),
+        ] {
+            if candidate.join("client.js").exists() && candidate.join("package.json").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn dsh_home() -> PathBuf {
     DSH_HOME.get().cloned().unwrap_or_else(|| {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -203,6 +231,14 @@ pub async fn check_and_install(app: tauri::AppHandle) -> Result<InstallStatus, S
     if let Some(plugin) = bundled_shell_plugin(&app) {
         if let Err(e) = install_shell_plugin(&home, &plugin) {
             log::warn!("install shell plugin failed: {}", e);
+        }
+    }
+
+    // 安装主题 UI 插件（向 DSH web UI 注入主题预设/控件）。失败不阻断安装，
+    // 仅记录警告——主题属于体验层，缺省仍可用官方默认外观。
+    if let Some(plugin) = bundled_rtui_ui_plugin(&app) {
+        if let Err(e) = install_rtui_ui_plugin(&home, &plugin) {
+            log::warn!("install rtui-ui plugin failed: {}", e);
         }
     }
 
@@ -294,6 +330,57 @@ fn install_shell_plugin(home: &PathBuf, plugin: &PathBuf) -> Result<(), String> 
     Ok(())
 }
 
+/// 每次启动刷新主题 UI 插件（幂等）：把 bundle 内的插件覆盖安装到 DSH_HOME，
+/// 并确保注册到 web profile 的 bundles。旧安装因此也能获得主题预设/控件的更新。
+pub(crate) fn refresh_rtui_ui_plugin(app: &tauri::AppHandle) -> Result<(), String> {
+    let home = dsh_home();
+    if let Some(plugin) = bundled_rtui_ui_plugin(app) {
+        install_rtui_ui_plugin(&home, &plugin)
+    } else {
+        Ok(())
+    }
+}
+
+/// 安装主题 UI 插件：
+/// 1. 复制到 <DSH_HOME>/node_modules/@iyam/dsh-rtui-ui
+/// 2. 注册到 <DSH_HOME>/profiles/web/package.json 的 dsh.profile.bundles（幂等）
+fn install_rtui_ui_plugin(home: &PathBuf, plugin: &PathBuf) -> Result<(), String> {
+    let dest = home.join("node_modules").join("@iyam").join("dsh-rtui-ui");
+    copy_dir_all(plugin, &dest).map_err(|e| format!("复制主题 UI 插件失败: {}", e))?;
+
+    let profile_pkg = home.join("profiles").join("web").join("package.json");
+    let mut v: serde_json::Value = if profile_pkg.exists() {
+        let content = fs::read_to_string(&profile_pkg).map_err(|e| format!("读取 profile 配置失败: {}", e))?;
+        serde_json::from_str(&content).map_err(|e| format!("解析 profile 配置失败: {}", e))?
+    } else {
+        if let Some(parent) = profile_pkg.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建 profile 目录失败: {}", e))?;
+        }
+        serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dependencies": {},
+            "dsh": {
+                "profile": {
+                    "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
+                }
+            }
+        })
+    };
+
+    let bundles = v["dsh"]["profile"]["bundles"]
+        .as_array_mut()
+        .ok_or("profile 配置缺少 dsh.profile.bundles")?;
+    if !bundles.iter().any(|b| b.as_str() == Some("@iyam/dsh-rtui-ui")) {
+        bundles.push(serde_json::Value::String("@iyam/dsh-rtui-ui".into()));
+    }
+
+    let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化 profile 配置失败: {}", e))?;
+    fs::write(&profile_pkg, out + "\n").map_err(|e| format!("写入 profile 配置失败: {}", e))?;
+
+    Ok(())
+}
+
 /// 任务栏 AUMID 预加载脚本：让 DSH 子进程（目录选择对话框等）与主应用共享
 /// AppUserModelID（ai.iyam.dsh），任务栏按钮并入主应用，避免单独弹出 node 图标。
 /// 通过 `NODE_OPTIONS=--require=` 注入 DSH 进程树，脚本内任何异常都静默吞掉，
@@ -337,4 +424,51 @@ fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// 为 native 目录选择器的对话框 worker 打 owner 补丁(幂等)。
+///
+/// 官方 `dsh-host-directory-picker-native` 的 worker 用 `Show(null)` 打开
+/// IFileOpenDialog:无 owner 的模态对话框会在任务栏单列一个按钮，图标是 node.exe 的。
+/// 把 worker 的 Show owner 改为读环境变量 `DSH_DIALOG_OWNER_HWND`，对话框即成为
+/// 主窗口的 owned window → 不占任务栏、图标继承应用。
+///
+/// worker 位于 DSH_HOME 内，DSH 升级会还原；本函数每次启动幂等重打。
+/// 目标字符串找不到时只警告不阻断(升级后结构变化)。
+///
+/// 注意:补丁是防御式的——owner 值无效(负数/0/非数字/超大值)时回退 Show(null)，
+/// 保证目录选择器永远可用;只有有效句柄才传 owner，避免 IFileOpenDialog::Show
+/// 返回 E_INVALIDARG(0x80070057)。
+pub(crate) fn ensure_picker_owner_patch(home: &PathBuf) {
+    let worker = home
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh-host-directory-picker-native")
+        .join("lib")
+        .join("worker.cjs");
+    let content = match fs::read_to_string(&worker) {
+        Ok(c) => c,
+        Err(_) => return, // 包缺失/路径变化:交给引擎自身报错
+    };
+    // 若已是防御式补丁则跳过;否则(原始代码或旧的非防御补丁)重新打。
+    if content.contains("const _h = process.env.DSH_DIALOG_OWNER_HWND") {
+        return;
+    }
+    const FROM: &str = "show: () => method(dialog, SLOT_SHOW, protoShow)(null),";
+    const TO: &str = "show: () => { const _h = process.env.DSH_DIALOG_OWNER_HWND; let _o = null; if (_h && /^[0-9]+$/.test(_h)) { const _n = Number(_h); if (_n > 0 && _n <= 0x7fffffff) { try { const _u = koffi.load('user32.dll'); const _isw = _u.func('__stdcall', 'IsWindow', 'int32', ['void *']); if (_isw(_n)) _o = _n; } catch (_e) { _o = null; } } } return method(dialog, SLOT_SHOW, protoShow)(_o); },";
+    // 旧的非防御式补丁还原为原始形态，再统一打防御式补丁
+    const OLD_TO: &str = "show: () => method(dialog, SLOT_SHOW, protoShow)(process.env.DSH_DIALOG_OWNER_HWND ? Number(process.env.DSH_DIALOG_OWNER_HWND) : null),";
+    let base = content.replace(OLD_TO, FROM);
+    if base.contains(FROM) {
+        let patched = base.replace(FROM, TO);
+        if let Err(e) = fs::write(&worker, patched) {
+            log::warn!("写目录选择器 owner 补丁失败({}): {e}", worker.display());
+        } else {
+            log::info!("已为目录选择器打 owner 补丁: {}", worker.display());
+        }
+    } else {
+        log::warn!(
+            "worker.cjs 结构变化，未打对话框 owner 补丁（引擎升级后需同步；目录选择仍可用，仅对话框图标为 node）"
+        );
+    }
 }

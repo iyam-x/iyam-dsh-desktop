@@ -1,16 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
 import { useEffect, useState } from "react";
 import { TitleBar } from "./components/TitleBar";
 import "./App.css";
 
-type AppStatus = "installing" | "loading" | "ready" | "error";
+type AppStatus = "installing" | "loading" | "ready" | "crashed" | "error";
 
 interface InstallState {
   status: AppStatus;
@@ -18,13 +13,6 @@ interface InstallState {
   port?: number;
   error?: string;
 }
-
-// DSH shell 插件 postMessage 通知桥：turn/end reason → 通知文案
-const TURN_END_TEXT: Record<string, string> = {
-  completed: "DeepSeek Harness 已完成回复",
-  "max-tokens": "回复达到 token 上限",
-  error: "回复出现错误",
-};
 
 export default function App() {
   const [state, setState] = useState<InstallState>({
@@ -81,11 +69,21 @@ export default function App() {
 
     init();
 
-    // Listen for port-ready events (from existing process)
+    // Listen for port-ready events (from existing process or fresh start)
     listen<number>("dsh-port-ready", (event: Event<number>) => {
       setState((prev) => {
-        if (prev.status !== "ready") {
+        if (prev.status !== "ready" && prev.status !== "crashed") {
           return { status: "ready", message: "", port: event.payload };
+        }
+        return prev;
+      });
+    }).catch(() => {});
+
+    // DSH 进程意外退出时通知前端切换到崩溃状态
+    listen<void>("dsh-process-exit", () => {
+      setState((prev) => {
+        if (prev.status === "ready") {
+          return { ...prev, status: "crashed" };
         }
         return prev;
       });
@@ -96,34 +94,21 @@ export default function App() {
     };
   }, []);
 
-  // DSH iframe（跨域）内的 shell 插件通过 postMessage 上报 turn/end，
-  // 窗口未聚焦时弹系统通知；通知相关异常一律静默。
+  // DSH iframe（跨域）内的 shell 插件通过 postMessage 上报会话事件
+  // （对话完成 / 等待授权 / 等待回复），转发给 Rust notify 命令；
+  // obscured 判断与弹系统通知都在 Rust 侧完成，通知相关异常一律静默。
   useEffect(() => {
     let disposed = false;
 
-    async function handleTurnEnd(reason: string) {
-      const text = TURN_END_TEXT[reason];
-      if (!text) return;
-      try {
-        const win = getCurrentWindow();
-        if (await win.isFocused()) return;
-        let granted = await isPermissionGranted();
-        if (!granted) {
-          granted = (await requestPermission()) === "granted";
-        }
-        if (!granted || disposed) return;
-        sendNotification({ title: "DeepSeek Harness", body: text });
-      } catch (_) {
-        // 静默
-      }
-    }
-
     const onMessage = (e: MessageEvent) => {
-      const data = e.data as { source?: string; type?: string; reason?: string } | null;
+      const data = e.data as
+        | { source?: string; type?: string; title?: string; reason?: string }
+        | null;
       if (!data || data.source !== "iyam-dsh-shell" || data.type !== "turn-end") return;
-      if (typeof data.reason === "string") {
-        handleTurnEnd(data.reason).catch(() => {});
-      }
+      const title = typeof data.title === "string" ? data.title : "DeepSeek Harness";
+      const body = typeof data.reason === "string" ? data.reason : "";
+      if (!body || disposed) return;
+      invoke("notify", { title, body }).catch(() => {});
     };
 
     window.addEventListener("message", onMessage);
@@ -143,6 +128,29 @@ export default function App() {
             <h2>启动失败</h2>
             <p className="error-msg">{state.error || state.message}</p>
             <button onClick={() => window.location.reload()}>重试</button>
+            <p className="error-hint">
+              也可手动在终端运行：
+              <code>~/.iyam-dsh/bin/dsh web</code>
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // DSH 进程意外退出
+  if (state.status === "crashed") {
+    return (
+      <div className="app-shell">
+        <TitleBar />
+        <div className="app crashed">
+          <div className="error-card">
+            <div className="error-icon">⚡</div>
+            <h2>DeepSeek Harness 已退出</h2>
+            <p className="error-msg">
+              后台进程意外终止，可能是内存不足或内部错误。
+            </p>
+            <button onClick={() => invoke("restart_dsh")}>重启 DSH</button>
             <p className="error-hint">
               也可手动在终端运行：
               <code>~/.iyam-dsh/bin/dsh web</code>

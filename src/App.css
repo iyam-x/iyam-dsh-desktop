@@ -1,3 +1,8 @@
 .app {
   background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
 }
+
+/* crashed 状态与 error 状态共用样式 */
+.app.crashed {
+  /* 与 .app.error 相同 */
+}

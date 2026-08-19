@@ -10,8 +10,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use regex::Regex;
 use tauri::Emitter;
+use tauri::Manager;
 
 use crate::installer::{bundled_node, dsh_home, get_install_status, InstallStatus};
+use crate::process_state::DSH_CHILD;
 
 /// Start the DSH web server process and return the port.
 /// 直接 spawn bundle 内的 node 运行 lib/bin.js，不依赖系统 node / 系统 dsh。
@@ -60,9 +62,15 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     // 写入任务栏 AUMID 预加载脚本（幂等），使 node 子进程（目录选择对话框等）
     // 与主应用共享 AppUserModelID，任务栏按钮并入主应用，不单独显示图标。
     crate::installer::ensure_taskbar_preload(&home)?;
+    // 为目录选择器 worker 打 owner 补丁（幂等），使对话框归入主窗口任务栏按钮
+    crate::installer::ensure_picker_owner_patch(&home);
     // 每次启动刷新桌面壳插件（幂等），旧安装也能获得布局/通知桥更新
     if let Err(e) = crate::installer::refresh_shell_plugin(&app) {
         log::warn!("refresh shell plugin failed: {}", e);
+    }
+    // 每次启动刷新主题 UI 插件（幂等），旧安装也能获得主题预设/控件的更新
+    if let Err(e) = crate::installer::refresh_rtui_ui_plugin(&app) {
+        log::warn!("refresh rtui-ui plugin failed: {}", e);
     }
 
     let mut cmd = Command::new(&node);
@@ -80,6 +88,24 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
             cmd.env("NODE_OPTIONS", format!("--require=\"{}\"", path));
         }
     }
+    // 注入对话框 owner HWND：native 目录选择器 worker 以此为 IFileOpenDialog 的 owner，
+    // 对话框成为主窗口的 owned window → 不占独立任务栏按钮、图标继承应用。
+    // 仅注入有效的顶层窗口句柄；无效则不注入（worker 回退 Show(null)，目录选择器照常可用）。
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+        if let Some(win) = app.get_webview_window("main") {
+            if let Ok(hwnd) = win.hwnd() {
+                // hwnd.0: *mut c_void；windows-sys 的 HWND = isize
+                let val = hwnd.0 as isize;
+                let valid = unsafe { IsWindow(val as _) } != 0;
+                log::info!("owner HWND: {val} (is_window={valid})");
+                if valid {
+                    cmd.env("DSH_DIALOG_OWNER_HWND", val.to_string());
+                }
+            }
+        }
+    }
     // Windows：GUI 应用 spawn 控制台程序（node.exe）时，默认会新建一个可见的
     // cmd 窗口。加 CREATE_NO_WINDOW 让子进程无控制台后台运行。
     #[cfg(windows)]
@@ -92,12 +118,13 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
 
     fs::write(&pid_file, pid.to_string()).ok();
 
+    // 先取出 stdout/stderr pipe
     let stdout = child.stdout.take().ok_or("无法获取 stdout")?;
     let stderr = child.stderr.take().ok_or("无法获取 stderr")?;
 
     let port_regex = Regex::new(r"dsh\s+web:\s+http://127\.0\.0\.1:(\d+)").unwrap();
 
-    // Thread to read port from stdout
+    // Thread to read port from stdout（只传 stdout pipe，不传 child）
     let port_handle = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -117,7 +144,7 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         None
     });
 
-    // Drain stderr
+    // Drain stderr（只传 stderr pipe）
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -133,9 +160,29 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         Ok(Some(port)) => {
             fs::write(home.join("dsh.port"), port.to_string()).ok();
             let _ = app.emit("dsh-port-ready", port);
+
+            // 成功后才将 child 存入全局静态，并启动守护线程监听进程退出
+            {
+                let mut global = DSH_CHILD.lock().unwrap();
+                if let Some(old) = global.as_mut() {
+                    let _ = old.kill();
+                }
+                *global = Some(child);
+            }
+            let exit_app = app.clone();
+            std::thread::spawn(move || {
+                if let Ok(mut locked) = DSH_CHILD.lock() {
+                    if let Some(mut c) = locked.take() {
+                        let _ = c.wait();
+                        let _ = exit_app.emit("dsh-process-exit", ());
+                    }
+                }
+            });
+
             Ok(port)
         }
         _ => {
+            // 超时或端口读取失败：child 仍在作用域内，直接 kill
             child.kill().ok();
             fs::remove_file(&pid_file).ok();
             Err("DSH 启动超时（30s），请查看日志".to_string())
@@ -146,18 +193,10 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
 /// Stop the running DSH process
 #[tauri::command]
 pub async fn stop_dsh() -> Result<(), String> {
+    crate::process_state::kill_dsh_on_exit();
     let home = dsh_home();
-    let pid_file = home.join("dsh.pid");
-
-    if pid_file.exists() {
-        let pid_str = fs::read_to_string(&pid_file).unwrap_or_default();
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            kill_process(pid);
-        }
-        fs::remove_file(pid_file).ok();
-        fs::remove_file(home.join("dsh.port")).ok();
-    }
-
+    fs::remove_file(home.join("dsh.pid")).ok();
+    fs::remove_file(home.join("dsh.port")).ok();
     Ok(())
 }
 
