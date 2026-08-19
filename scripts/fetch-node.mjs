@@ -14,7 +14,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, renameSync, chmodSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -73,17 +73,29 @@ function extract(archive, targetName) {
   rmSync(destDir, { recursive: true, force: true });
   mkdirSync(destDir, { recursive: true });
 
-  // 统一用系统 tar（macOS/Windows 的 bsdtar 支持 zip，Linux 的 GNU tar 支持 tar.gz）
-  execFileSync(
-    "tar",
-    ["-xf", archive, "-C", destDir, "--strip-components=2", TARGETS[targetName].entry],
-    { stdio: "inherit" }
-  );
+  // 统一用系统 tar（macOS/Linux 的 bsdtar 支持 zip，Linux 的 GNU tar 支持 tar.gz）
+  // Windows 显式用系统自带的 bsdtar：Git Bash 的 GNU tar 既不支持 zip，也会把盘符
+  // 路径 "C:\..."（含冒号）误认为远程主机。
+  const tar =
+    process.platform === "win32" && existsSync("C:\\Windows\\System32\\tar.exe")
+      ? "C:\\Windows\\System32\\tar.exe"
+      : "tar";
+  // 只解压目标成员、不用 --strip-components：Windows 的 bsdtar 在「指定成员 + strip」
+  // 组合下会静默产出空结果，解压后手动把文件挪到目标位置。
+  const entry = TARGETS[targetName].entry;
+  execFileSync(tar, ["-xf", archive, "-C", destDir, entry], { stdio: "inherit" });
+
+  // 解出的文件带中间目录（如 node-v24.19.0-win-x64/node.exe），挪到 destDir 根并清理
+  const exeName = TARGETS[targetName].exe;
+  const extracted = join(destDir, entry);
+  const finalPath = join(destDir, exeName);
+  renameSync(extracted, finalPath);
+  rmSync(dirname(extracted), { recursive: true, force: true });
 
   if (process.platform !== "win32") {
-    execFileSync("chmod", ["+x", join(destDir, TARGETS[targetName].exe)]);
+    chmodSync(finalPath, 0o755);
   }
-  console.log(`→ ${join(destDir, TARGETS[targetName].exe)}`);
+  console.log(`→ ${finalPath}`);
 }
 
 function fetchOne(targetName) {
