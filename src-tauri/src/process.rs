@@ -2,6 +2,12 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 use regex::Regex;
 use tauri::Emitter;
 
@@ -51,12 +57,35 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     }
 
     // Spawn DSH with DSH_HOME pointing to our home
+    // 写入任务栏 AUMID 预加载脚本（幂等），使 node 子进程（目录选择对话框等）
+    // 与主应用共享 AppUserModelID，任务栏按钮并入主应用，不单独显示图标。
+    crate::installer::ensure_taskbar_preload(&home)?;
+    // 每次启动刷新桌面壳插件（幂等），旧安装也能获得布局/通知桥更新
+    if let Err(e) = crate::installer::refresh_shell_plugin(&app) {
+        log::warn!("refresh shell plugin failed: {}", e);
+    }
+
     let mut cmd = Command::new(&node);
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
        .arg(&bin_js).arg("web").arg("--port").arg("0")
        .stdout(Stdio::piped())
        .stderr(Stdio::piped())
        .stdin(Stdio::null());
+    // 注入 AUMID 预加载脚本（仅 Windows 有效；文件缺失时跳过，避免启动失败）
+    #[cfg(windows)]
+    {
+        let preload = home.join("set-taskbar-aumid.cjs");
+        if preload.exists() {
+            let path = preload.to_string_lossy().replace('\\', "/");
+            cmd.env("NODE_OPTIONS", format!("--require=\"{}\"", path));
+        }
+    }
+    // Windows：GUI 应用 spawn 控制台程序（node.exe）时，默认会新建一个可见的
+    // cmd 窗口。加 CREATE_NO_WINDOW 让子进程无控制台后台运行。
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let mut child = cmd.spawn().map_err(|e| format!("无法启动 DSH: {}", e))?;
     let pid = child.id();
@@ -145,10 +174,10 @@ fn kill_process(pid: u32) {
     }
     #[cfg(windows)]
     {
-        Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output()
-            .ok();
+        let mut k = Command::new("taskkill");
+        k.args(["/F", "/PID", &pid.to_string()]);
+        k.creation_flags(CREATE_NO_WINDOW);
+        k.output().ok();
     }
 }
 
@@ -159,9 +188,10 @@ fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
+        let mut tl = Command::new("tasklist");
+        tl.args(["/FI", &format!("PID eq {}", pid), "/NH"]);
+        tl.creation_flags(CREATE_NO_WINDOW);
+        tl.output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
             .unwrap_or(false)
     }

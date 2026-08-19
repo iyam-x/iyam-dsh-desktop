@@ -240,6 +240,18 @@ fn create_wrappers(home: &PathBuf, node: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// 每次启动刷新桌面壳插件（幂等）：把 bundle 内的插件覆盖安装到 DSH_HOME，
+/// 并确保注册到 web profile 的 bundles。旧安装因此也能获得桌面壳更新
+/// （布局 CSS、通知桥等）。
+pub(crate) fn refresh_shell_plugin(app: &tauri::AppHandle) -> Result<(), String> {
+    let home = dsh_home();
+    if let Some(plugin) = bundled_shell_plugin(app) {
+        install_shell_plugin(&home, &plugin)
+    } else {
+        Ok(())
+    }
+}
+
 /// 安装桌面壳 companion 插件：
 /// 1. 复制到 <DSH_HOME>/node_modules/@iyam/dsh-desktop-shell
 /// 2. 注册到 <DSH_HOME>/profiles/web/package.json 的 dsh.profile.bundles（幂等）
@@ -280,6 +292,36 @@ fn install_shell_plugin(home: &PathBuf, plugin: &PathBuf) -> Result<(), String> 
     fs::write(&profile_pkg, out + "\n").map_err(|e| format!("写入 profile 配置失败: {}", e))?;
 
     Ok(())
+}
+
+/// 任务栏 AUMID 预加载脚本：让 DSH 子进程（目录选择对话框等）与主应用共享
+/// AppUserModelID（ai.iyam.dsh），任务栏按钮并入主应用，避免单独弹出 node 图标。
+/// 通过 `NODE_OPTIONS=--require=` 注入 DSH 进程树，脚本内任何异常都静默吞掉，
+/// 绝不阻断 node 进程启动。
+const TASKBAR_AUMID_PRELOAD: &str = r#"// iyam-dsh: 与主应用共享 AppUserModelID
+// DSH 的 Win32 目录选择对话框由独立 node 子进程打开，默认以 node.exe 图标单独
+// 占据一个任务栏按钮。设置与主应用相同的 AUMID 后，按钮并入主应用任务栏入口。
+// 通过 NODE_OPTIONS=--require 注入；异常全部静默，避免影响 DSH 启动。
+try {
+  const koffi = require('koffi');
+  const shell32 = koffi.load('shell32.dll');
+  const setAumid = shell32.func(
+    'int32 __stdcall SetCurrentProcessExplicitAppUserModelID(str16 AppID)'
+  );
+  setAumid('ai.iyam.dsh');
+} catch (_) {
+  // noop
+}
+"#;
+
+/// 幂等写入任务栏 AUMID 预加载脚本到 DSH_HOME（已存在则跳过）。
+pub(crate) fn ensure_taskbar_preload(home: &std::path::Path) -> Result<(), String> {
+    let path = home.join("set-taskbar-aumid.cjs");
+    if path.exists() {
+        return Ok(());
+    }
+    fs::write(&path, TASKBAR_AUMID_PRELOAD)
+        .map_err(|e| format!("写入任务栏预加载脚本失败: {}", e))
 }
 
 fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {

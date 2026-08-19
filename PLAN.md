@@ -387,3 +387,25 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 ### 4. Dev 模式资源定位
 
 - `tauri dev` 的 cwd 是 `src-tauri/`，源码树回退需同时尝试 `cwd/src-tauri/bin/...` 与 `cwd/bin/...`；生产用 `resource_dir()`；dev 用 exe 同级（build.rs 复制到 `target/{profile}/`）。
+
+### 5. fetch-node.mjs 在 Git Bash / Windows 下的 tar 坑（2018-08-19）
+
+- **症状**：`tar: Cannot connect to C: resolve failed`（GNU tar 把盘符路径 `C:\...` 当远程主机）→ 加 `--force-local` 后又报 `This does not look like a tar archive`（GNU tar 不支持 zip）。
+- **根因**：Git Bash 的 PATH 里 `/usr/bin/tar`（GNU tar 1.35）盖过 Windows 系统 `C:\Windows\System32\tar.exe`（bsdtar 3.8+，支持 zip）；脚本注释假设 Windows 用 bsdtar 不成立。
+- **修复**：win32 下显式用 `C:\Windows\System32\tar.exe`（bsdtar）。
+- **另一个坑**：bsdtar 的「指定成员 + `--strip-components`」组合会静默产出空结果（exit 0 但文件不落盘）。改为只解压成员、不 strip，解压后手动 `rename` 到目标位置。
+
+### 6. 内置 DSH 依赖树过深 → Windows 打包失败（2018-08-19）
+
+- **症状**：`light.exe`（MSI）与 `makensis`（NSIS）都报 `cannot find / failed opening ...deserializationPattern.js`，而文件实际存在。
+- **根因**：npm `--install-strategy=nested` 造成 `node_modules` 逐层嵌套，最深绝对路径约 470 字符 > Windows MAX_PATH（260），32 位打包工具读不到文件。
+- **修复**：用默认 **hoisted** 策略安装 `@deepseek-ai/dsh`，把完整拍平的 `node_modules` 作为 `dsh-package/node_modules/`（即 `dsh-package` = 包文件 + 整个 hoisted node_modules 合并，删除 `node_modules/@deepseek-ai/dsh` 自引用）。最长路径降到 164 字符；包体也从 540M 减到 280M。
+- **配套**：Windows `bundle.targets` 从 `"all"`（msi+nsis）改为 `["nsis"]`，避免 WiX 长路径限制；PLAN §3 的 Windows 交付物本来就是 NSIS setup.exe。
+- **注意**：tauri CLI 会自动同步 `Cargo.toml` 中 `tauri` 的 features 与 `tauri.conf.json` allowlist 一致（Windows 下会移除 `macos-private-api`，因为该配置在 `tauri.macos.conf.json` 平台覆盖里）。**不要手动加回**，否则 `cargo check` 报 features 不匹配；macOS 构建时 CLI 会因平台配置自动加回。
+
+### 7. 启动弹终端窗口 + 目录选择器弹 node 图标（2018-08-19）
+
+- **启动弹 Windows Terminal**：Tauri GUI 应用必须 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`（main.rs 顶部），否则 release 二进制是 console subsystem，Windows 11 会把它塞进 Windows Terminal 标签页并显示 env_logger 日志。
+- **spawn node.exe 弹 cmd**：GUI 进程 spawn 控制台程序默认会新建可见 console，需给 `Command` 加 `CREATE_NO_WINDOW`（`0x08000000`）。
+- **目录选择器弹 node 图标**：DSH 的 Win32 目录选择器由独立 `node.exe` worker 调 `IFileOpenDialog`，对话框成为无主窗口 → 任务栏单独出现 node 图标。**不改 DSH 内核/不改 node.exe**，改用 `NODE_OPTIONS=--require=<preload>` 注入预加载脚本（installer.rs `ensure_taskbar_preload`），脚本用 koffi 调 `SetCurrentProcessExplicitAppUserModelID("ai.iyam.dsh")`，使 worker 与主应用共享 AppUserModelID，任务栏按钮并入主应用。预加载脚本必须 try/catch 全静默，避免阻断 node 启动。
+- **AUMID 归并的前提**：主应用也必须设置相同的 AUMID。tauri/tao/wry **都不会**自动调用 `SetCurrentProcessExplicitAppUserModelID`，默认任务栏按 exe 路径分组——只给 worker 设 AUMID 反而会出现"两个图标"（主应用 exe 路径组 + worker 的 ai.iyam.dsh 组）。修复：`main.rs` 启动时同样调用 `SetCurrentProcessExplicitAppUserModelID(w!("ai.iyam.dsh"))`（windows-sys 需加 `Win32_UI_Shell` feature）。两边 AUMID 一致后才归并为单按钮。
