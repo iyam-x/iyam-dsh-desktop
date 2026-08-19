@@ -15,6 +15,7 @@
     "core:window:allow-start-dragging",
     "core:menu:default",
     "shell:allow-open",
-    "store:default"
+    "store:default",
+    "notification:default"
   ]
 }

@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { useEffect, useState } from "react";
 import { TitleBar } from "./components/TitleBar";
 import "./App.css";
@@ -12,6 +18,13 @@ interface InstallState {
   port?: number;
   error?: string;
 }
+
+// DSH shell 插件 postMessage 通知桥：turn/end reason → 通知文案
+const TURN_END_TEXT: Record<string, string> = {
+  completed: "DeepSeek Harness 已完成回复",
+  "max-tokens": "回复达到 token 上限",
+  error: "回复出现错误",
+};
 
 export default function App() {
   const [state, setState] = useState<InstallState>({
@@ -80,6 +93,43 @@ export default function App() {
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // DSH iframe（跨域）内的 shell 插件通过 postMessage 上报 turn/end，
+  // 窗口未聚焦时弹系统通知；通知相关异常一律静默。
+  useEffect(() => {
+    let disposed = false;
+
+    async function handleTurnEnd(reason: string) {
+      const text = TURN_END_TEXT[reason];
+      if (!text) return;
+      try {
+        const win = getCurrentWindow();
+        if (await win.isFocused()) return;
+        let granted = await isPermissionGranted();
+        if (!granted) {
+          granted = (await requestPermission()) === "granted";
+        }
+        if (!granted || disposed) return;
+        sendNotification({ title: "DeepSeek Harness", body: text });
+      } catch (_) {
+        // 静默
+      }
+    }
+
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data as { source?: string; type?: string; reason?: string } | null;
+      if (!data || data.source !== "iyam-dsh-shell" || data.type !== "turn-end") return;
+      if (typeof data.reason === "string") {
+        handleTurnEnd(data.reason).catch(() => {});
+      }
+    };
+
+    window.addEventListener("message", onMessage);
+    return () => {
+      disposed = true;
+      window.removeEventListener("message", onMessage);
     };
   }, []);
 
