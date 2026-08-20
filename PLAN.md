@@ -428,3 +428,11 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 - **规则**：**绝不在持有 mutex 期间做 `child.wait()` 这类阻塞等待**。先 `take()` 取出 child、立即释放锁，再 kill/wait。
 - **修复**：`kill_dsh_on_exit` 与守护线程都改为「取 child → 释放锁 → 再 wait」。`app.exit()` 在 Tauri v2 会强制结束事件循环（窗口被强关），`on_window_event` 的 `prevent_close()` 只拦用户关窗、不影响程序退出，故死锁解除后退出即正常。
 - **经验**：Windows 上 `MutexGuard` 的生命周期要看得比锁本身更远——`wait()` 会把锁连带阻塞进 I/O 等待，务必在作用域内尽早 drop。排查"点了没反应"类问题优先怀疑主线程被阻塞。
+
+### 10. 内置插件升级后不生效：刷新被「已运行早退」跳过（2026-08-20）
+
+- **症状**：新内置插件（`dsh-file-handler`）打进新构建并安装后，点击文件仍调系统工具。检查 `DSH_HOME/node_modules/@iyam/` 发现新插件根本没拷进去，`profiles/web/package.json` 的 bundles 也没注册。
+- **根因**：`start_dsh` 在「DSH 已运行（pid 文件 + 进程存活）」时提前 `return`，**跳过了其后的插件刷新**；且旧构建残留的 DSH 进程从未加载过新插件集——即使文件拷进去，也要重启 DSH 才生效。
+- **规则**：**内置插件的安装/刷新必须在 `start_dsh` 的「已运行早退」之前执行**，不要放在 spawn 之前那段（早退永远走不到）。
+- **修复**：`process.rs` 把 shell/rtui-ui/file-handler 三个刷新移到 pid 检查前；以「`@iyam/dsh-file-handler/client.js` 是否存在」作为"运行中的 DSH 早于当前构建"的升级标记，缺失则杀掉旧进程走全新 spawn，让新 DSH 加载最新插件。
+- **经验**：凡是"升级后行为没变"类问题，先确认运行中的进程是否真的加载了新资源。DSH 是长驻服务，插件/资源变更必须重启才生效；客户端插件做 `window.__ModuleLoader__.load` 包装时，`ctx.<service>` 在 apply 阶段即已可用（runner 会按 inject 声明做激活门控，等依赖服务就绪再 apply）。

@@ -56,3 +56,54 @@ pub fn read_file_data(path: String) -> Result<DataPreview, String> {
         base64: base64::engine::general_purpose::STANDARD.encode(bytes),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("iyam-dsh-test-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// 图片预览链路：read_file_data → data:image/png;base64,<b64> → 解码应还原原始字节。
+    #[test]
+    fn image_data_url_round_trip() {
+        // 最小 PNG 头 + 一些字节，模拟真实图片文件
+        let png: Vec<u8> = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        ];
+        let path = temp_file("img.png", &png);
+        let preview = read_file_data(path.to_string_lossy().into_owned()).expect("read_file_data 失败");
+        assert_eq!(preview.size as usize, png.len());
+        assert_eq!(preview.name, path.file_name().unwrap().to_string_lossy());
+
+        let data_url = format!("data:image/png;base64,{}", preview.base64);
+        let b64 = data_url.split(',').nth(1).expect("data url 格式错误");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("base64 解码失败");
+        assert_eq!(decoded, png, "data URL 解码应与原始字节一致");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 文本预览链路：read_text_file 返回 UTF-8 全文（含中文）。
+    #[test]
+    fn text_file_content_round_trip() {
+        let content = "你好，世界\nline2\n```rust\nlet x = 1;\n```\n";
+        let path = temp_file("notes.md", content.as_bytes());
+        let preview = read_text_file(path.to_string_lossy().into_owned()).expect("read_text_file 失败");
+        assert_eq!(preview.content, content);
+        assert_eq!(preview.name, path.file_name().unwrap().to_string_lossy());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 目录/不存在路径应报错而非 panic。
+    #[test]
+    fn missing_file_errors() {
+        let path = std::env::temp_dir().join("iyam-dsh-no-such-file-xyz.png");
+        assert!(read_file_data(path.to_string_lossy().into_owned()).is_err());
+    }
+}
