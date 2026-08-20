@@ -384,7 +384,6 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
         border: eff("--dsw-alias-border-l2", pick(tokens["--dsw-alias-border-l2"])),
       };
       try {
-        console.log("[rtui] syncThemeToShell dark=", dark, "accent=", accent, "colors=", JSON.stringify(colors));
         parent.postMessage({ source: "iyam-dsh-theme", type: "theme", dark, accent, colors }, "*");
       } catch (_e) { /* 壳未就绪时静默 */ }
     }
@@ -401,8 +400,6 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
     }
 
     function apply(ctx) {
-      console.log("[rtui] apply 被调用。ctx keys:", Object.keys(ctx).join(","));
-      console.log("[rtui] theme?.overrideTokens:", typeof ctx.theme?.overrideTokens, "| slots:", typeof ctx.slots, "| settingsScope:", typeof ctx.settingsScope);
       const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NS });
       ctx.locale.register(SETTINGS_NS, { zh, en });
       const store = createCustomStore();
@@ -412,16 +409,11 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
       const applyTheme = (values) => {
         if (disposeLayer) { disposeLayer(); disposeLayer = null; }
         if (values.enabled === false) return;
-        try {
-          const tokens = expandTokens(values.preset, {
-            accent: values.accent || "#4D6BFE",
-            sidebarContrast: values.sidebarContrast || "slightly",
-          });
-          disposeLayer = ctx.theme.overrideTokens(THEME_SOURCE, tokens);
-          console.log("[rtui] overrideTokens 成功:", Object.keys(tokens).length, "tokens, preset=", values.preset, "accent=", values.accent);
-        } catch (e) {
-          console.error("[rtui] applyTheme 失败:", e);
-        }
+        const tokens = expandTokens(values.preset, {
+          accent: values.accent || "#4D6BFE",
+          sidebarContrast: values.sidebarContrast || "slightly",
+        });
+        disposeLayer = ctx.theme.overrideTokens(THEME_SOURCE, tokens);
       };
       // 统一入口：记录当前值 + 应用主题 + 刷新结构性 CSS + 同步壳。既供快照应用，
       // 也供设置面板动作的"乐观应用"——立即生效，不依赖 host 写→读→subscribe 往返。
@@ -440,7 +432,6 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
           accent: user.accent || "#4D6BFE",
           sidebarContrast: user.sidebarContrast || "slightly",
         };
-        console.log("[rtui] applyFromSnapshot rev=", snap && snap.revision, "user=", JSON.stringify(user), "→ values=", JSON.stringify(values));
         applyValues(values);
         bound?.sync(values, snap ? snap.revision : -1);
       };
@@ -448,7 +439,6 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
       // 否则 live 修改会被兜底默认值覆盖，表现为"自定义主题没反应"。
       scope.subscribe(() => {
         const snap = scope.getSnapshot();
-        console.log("[rtui] subscribe 触发 rev=", snap && snap.revision, "user=", JSON.stringify(snap && snap.user));
         applyFromSnapshot(snap);
       });
       // 乐观应用：在写 host 之前先按新值刷新主题，保证用户一操作就立即看到变化。
