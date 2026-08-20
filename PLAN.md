@@ -408,4 +408,23 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 - **启动弹 Windows Terminal**：Tauri GUI 应用必须 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`（main.rs 顶部），否则 release 二进制是 console subsystem，Windows 11 会把它塞进 Windows Terminal 标签页并显示 env_logger 日志。
 - **spawn node.exe 弹 cmd**：GUI 进程 spawn 控制台程序默认会新建可见 console，需给 `Command` 加 `CREATE_NO_WINDOW`（`0x08000000`）。
 - **目录选择器弹 node 图标**：DSH 的 Win32 目录选择器由独立 `node.exe` worker 调 `IFileOpenDialog`，对话框成为无主窗口 → 任务栏单独出现 node 图标。**不改 DSH 内核/不改 node.exe**，改用 `NODE_OPTIONS=--require=<preload>` 注入预加载脚本（installer.rs `ensure_taskbar_preload`），脚本用 koffi 调 `SetCurrentProcessExplicitAppUserModelID("ai.iyam.dsh")`，使 worker 与主应用共享 AppUserModelID，任务栏按钮并入主应用。预加载脚本必须 try/catch 全静默，避免阻断 node 启动。
+
+### 8. client 插件 `__ModuleLoader__.load` 的 `id` 必须是完整包名（2026-08-20）
+
+- **症状**：打包安装后启动报 `Failed to load plugins` / `bundle /plugins/@iyam/dsh-rtui-ui/client.js loaded without registering "@iyam/dsh-rtui-ui" via __ModuleLoader__.load`。
+- **根因**：`client.js` 用 `window.__ModuleLoader__.load({ id, factory })` 注册时，`id` 写成了短名 `"dsh-rtui-ui"`。但 loader 以**完整包名**（`@iyam/dsh-rtui-ui`，来自插件 graph row / `package.json` 的 `name`）为 factory 表的 key，短名导致注册落到错误 key，`arrive("@iyam/dsh-rtui-ui")` 找不到 factory 而抛错。
+- **规则**：`load({ id, factory })` 的 `id` **必须等于插件完整包名**（如 `"@iyam/dsh-rtui-ui"`），与 `cordis.patch.yml` 里的短 `id:`（host config-tree 行 id，可短写）是两回事，勿混淆。所有官方 `@deepseek-ai/*` 插件均用完整包名。
+- **修复**：`src-tauri/bin/dsh-rtui-ui/client.js:13` 改为 `id: "@iyam/dsh-rtui-ui"`。
+- **传播**：改源码后必须重新 `tauri build` 并重新安装；仅重启无效。运行时 `process.rs` 的 `refresh_rtui_ui_plugin` 会从打包内置的插件资源刷新 `<DSH_HOME>/node_modules/@iyam/dsh-rtui-ui/client.js`，而该内置资源只在重新构建时才更新。
 - **AUMID 归并的前提**：主应用也必须设置相同的 AUMID。tauri/tao/wry **都不会**自动调用 `SetCurrentProcessExplicitAppUserModelID`，默认任务栏按 exe 路径分组——只给 worker 设 AUMID 反而会出现"两个图标"（主应用 exe 路径组 + worker 的 ai.iyam.dsh 组）。修复：`main.rs` 启动时同样调用 `SetCurrentProcessExplicitAppUserModelID(w!("ai.iyam.dsh"))`（windows-sys 需加 `Win32_UI_Shell` feature）。两边 AUMID 一致后才归并为单按钮。
+
+### 9. DSH 子进程退出清理死锁 → 托盘「退出」失效（2026-08-20）
+
+- **症状**：托盘菜单点「退出」后应用不退出，且此后托盘图标点击无任何反应（菜单不再弹出）。
+- **根因**：死锁。两处代码在**持有全局 `DSH_CHILD` 锁期间调用 `child.wait()`**：
+  - `process_state.rs::kill_dsh_on_exit()`（在 `RunEvent::ExitRequested` 里同步执行，主线程）：先 `DSH_CHILD.lock()` 再 `child.wait()`；
+  - `process.rs` 守护线程（监听 node 退出）：`DSH_CHILD.lock()` 持有 `locked` 的同时 `c.wait()`。
+  - 点击「退出」→ `app.exit(0)` → `ExitRequested` → `kill_dsh_on_exit()` 想拿锁杀 node，但锁被守护线程占着（守护线程在等 node 自然退出才释放锁）；node 是常驻服务不会自己退，只能被杀，而杀它又需要那把锁 → 主线程永久卡死。应用不退 + 托盘（同一主线程）无响应。只有 DSH 在运行时才触发（守护线程活跃）。
+- **规则**：**绝不在持有 mutex 期间做 `child.wait()` 这类阻塞等待**。先 `take()` 取出 child、立即释放锁，再 kill/wait。
+- **修复**：`kill_dsh_on_exit` 与守护线程都改为「取 child → 释放锁 → 再 wait」。`app.exit()` 在 Tauri v2 会强制结束事件循环（窗口被强关），`on_window_event` 的 `prevent_close()` 只拦用户关窗、不影响程序退出，故死锁解除后退出即正常。
+- **经验**：Windows 上 `MutexGuard` 的生命周期要看得比锁本身更远——`wait()` 会把锁连带阻塞进 I/O 等待，务必在作用域内尽早 drop。排查"点了没反应"类问题优先怀疑主线程被阻塞。

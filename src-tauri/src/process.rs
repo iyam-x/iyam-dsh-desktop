@@ -171,11 +171,15 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
             }
             let exit_app = app.clone();
             std::thread::spawn(move || {
-                if let Ok(mut locked) = DSH_CHILD.lock() {
-                    if let Some(mut c) = locked.take() {
-                        let _ = c.wait();
-                        let _ = exit_app.emit("dsh-process-exit", ());
-                    }
+                // 先取出 child 并立即释放锁，再 wait，避免持有锁期间阻塞导致死锁
+                let taken = if let Ok(mut locked) = DSH_CHILD.lock() {
+                    locked.take()
+                } else {
+                    None
+                };
+                if let Some(mut c) = taken {
+                    let _ = c.wait();
+                    let _ = exit_app.emit("dsh-process-exit", ());
                 }
             });
 

@@ -3,14 +3,13 @@
 // 老式客户端插件 API(与 @iyam/dsh-desktop-shell 同源)。
 //
 // 阶段1: 通过 ctx.theme.overrideTokens 注入主题 token(亮/暗成对)，并注入结构性 CSS。
-// 阶段2(增强): 4 套预设调色板(石墨灰/午夜蓝/纸白/Sepia) + 强调色自由取色 +
-// 字体族/圆角/密度 三项控件。窗口 chrome(标题栏)在本地 webview 实现，此处不注入。
+// 阶段2(增强): 4 套预设调色板(石墨灰/午夜蓝/纸白/Sepia) + 强调色驱动主按钮/焦点环。
+// 窗口 chrome(标题栏)在本地 webview 实现，此处不注入。
 //
-// 注意: DSH 无 radius/spacing token，圆角与密度靠注入 CSS(选择器为最佳努力，
-// 需目视微调)。字体与强调色走干净 token/变量钩子，稳健。
+// 强调色走干净 token 钩子，稳健。
 
 window.__ModuleLoader__.load({
-  id: "dsh-rtui-ui",
+  id: "@iyam/dsh-rtui-ui",
   factory: (require) => {
     const module = { exports: {} };
     const exports = module.exports;
@@ -76,28 +75,6 @@ window.__ModuleLoader__.load({
       { id: "slightly", label: "略深" },
       { id: "deeper", label: "更深" },
     ];
-    const FONTS = [
-      { id: "system", label: "系统默认" },
-      { id: "humanist", label: "人文无衬线" },
-      { id: "mono", label: "等宽优先" },
-    ];
-    const RADII = [
-      { id: "sharp", label: "直角" },
-      { id: "medium", label: "中等" },
-      { id: "round", label: "圆润" },
-    ];
-    const DENSITIES = [
-      { id: "compact", label: "紧凑" },
-      { id: "comfortable", label: "舒适" },
-    ];
-
-    const FONT_STACKS = {
-      system: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
-      humanist: '"Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif',
-      mono: '"Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, "PingFang SC", monospace',
-    };
-    const RADIUS_PX = { sharp: "0px", medium: "6px", round: "12px" };
-    const DENSITY_PAD = { compact: "8px", comfortable: "12px" };
 
     function withAlpha(hex, a) {
       const m = hex.replace("#", "");
@@ -112,6 +89,21 @@ window.__ModuleLoader__.load({
       const g = Math.round(parseInt(m.slice(2, 4), 16) * (1 - amt));
       const b = Math.round(parseInt(m.slice(4, 6), 16) * (1 - amt));
       return `rgb(${r}, ${g}, ${b})`;
+    }
+    function lighten(hex, amt) {
+      const m = hex.replace("#", "");
+      const ch = (c) => Math.round(parseInt(c, 16) + (255 - parseInt(c, 16)) * amt);
+      return `rgb(${ch(m.slice(0, 2))}, ${ch(m.slice(2, 4))}, ${ch(m.slice(4, 6))})`;
+    }
+    function relLuminance(hex) {
+      const m = hex.replace("#", "");
+      const f = (c) => { const s = parseInt(c, 16) / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+      return 0.2126 * f(m.slice(0, 2)) + 0.7152 * f(m.slice(2, 4)) + 0.0722 * f(m.slice(4, 6));
+    }
+    // 主按钮用 accent 填充时，按 accent 亮度反算按钮文字色，保证对比度。
+    function accentFg(accent, isLight) {
+      const lum = relLuminance(accent);
+      return isLight ? (lum > 0.55 ? "#1A1A1D" : "#FFFFFF") : (lum > 0.5 ? "#161618" : "#FFFFFF");
     }
     function sidebarFill(p, contrast, isLight) {
       const bg = isLight ? p.light.bg : p.dark.bg;
@@ -128,6 +120,9 @@ window.__ModuleLoader__.load({
       const sbD = sidebarFill(p, sidebarContrast, false);
       const acTintL = withAlpha(accent, 0.12), acTintD = withAlpha(accent, 0.18);
       const acHoverL = withAlpha(accent, 0.10), acHoverD = withAlpha(accent, 0.14);
+      const acBtnFill = accent;
+      const acBtnHoverL = darken(accent, 0.10), acBtnHoverD = lighten(accent, 0.12);
+      const acBtnFgL = accentFg(accent, true), acBtnFgD = accentFg(accent, false);
       return {
         // 背景分层
         "--dsw-alias-bg-base": { light: L.bg, dark: D.bg },
@@ -158,11 +153,11 @@ window.__ModuleLoader__.load({
         // 品牌
         "--dsw-alias-brand-primary": { light: L.brand, dark: D.brand },
         "--dsw-alias-brand-text": { light: L.brand, dark: D.brand },
-        "--dsw-alias-brand-primary-invert": { light: L.fg, dark: D.fg },
-        "--dsw-alias-brand-primary-new-colorprimary-new-color": { light: accent, dark: accent },
-        // 按钮
-        "--dsw-alias-button-primary-fill": { light: L.brand, dark: D.brand },
-        "--dsw-alias-button-primary-hover": { light: L.btnHover, dark: D.btnHover },
+        // 主按钮文字色按 accent 亮度反算（保证对比度）
+        "--dsw-alias-brand-primary-invert": { light: acBtnFgL, dark: acBtnFgD },
+        // 按钮: 强调色驱动主按钮填充与悬停
+        "--dsw-alias-button-primary-fill": { light: acBtnFill, dark: acBtnFill },
+        "--dsw-alias-button-primary-hover": { light: acBtnHoverL, dark: acBtnHoverD },
         "--dsw-alias-button-primary-dimmed": { light: L.layer3, dark: D.layer3 },
         "--dsw-alias-button-contrast-fill": { light: L.brand, dark: D.brand },
         "--dsw-alias-button-elevated-fill": { light: L.layer1, dark: D.layer1 },
@@ -229,7 +224,7 @@ window.__ModuleLoader__.load({
       return defineStore({
         init: () => ({
           enabled: true, preset: "graphite", accent: "#4D6BFE", sidebarContrast: "slightly",
-          font: "system", radius: "medium", density: "comfortable", revision: -1,
+          revision: -1,
         }),
         actions: {
           sync: (d, values, revision) => {
@@ -238,9 +233,6 @@ window.__ModuleLoader__.load({
             d.preset = values.preset || "graphite";
             d.accent = values.accent || "#4D6BFE";
             d.sidebarContrast = values.sidebarContrast || "slightly";
-            d.font = values.font || "system";
-            d.radius = values.radius || "medium";
-            d.density = values.density || "comfortable";
             d.revision = revision;
           },
         },
@@ -269,14 +261,11 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function CustomThemeRow({ t, useStore, setEnabled, setPreset, setAccent, setSidebarContrast, setFont, setRadius, setDensity }) {
+    function CustomThemeRow({ t, useStore, setEnabled, setPreset, setAccent, setSidebarContrast }) {
       const enabled = useStore((s) => s.enabled);
       const preset = useStore((s) => s.preset);
       const accent = useStore((s) => s.accent);
       const sidebarContrast = useStore((s) => s.sidebarContrast);
-      const font = useStore((s) => s.font);
-      const radius = useStore((s) => s.radius);
-      const density = useStore((s) => s.density);
       return h("div", { style: { padding: "8px 0" } },
         h("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 14, fontWeight: 600, marginBottom: 8 } }, t("dsh-rtui.title")),
         ControlRow({ label: t("dsh-rtui.enable"),
@@ -292,15 +281,6 @@ window.__ModuleLoader__.load({
         ControlRow({ label: t("dsh-rtui.sidebarContrast"),
           children: h("select", { value: sidebarContrast, onChange: (e) => setSidebarContrast(e.target.value), style: selectStyle },
             CONTRASTS.map((c) => h("option", { key: c.id, value: c.id }, c.label))) }),
-        ControlRow({ label: t("dsh-rtui.font"),
-          children: h("select", { value: font, onChange: (e) => setFont(e.target.value), style: selectStyle },
-            FONTS.map((c) => h("option", { key: c.id, value: c.id }, c.label))) }),
-        ControlRow({ label: t("dsh-rtui.radius"),
-          children: h("select", { value: radius, onChange: (e) => setRadius(e.target.value), style: selectStyle },
-            RADII.map((c) => h("option", { key: c.id, value: c.id }, c.label))) }),
-        ControlRow({ label: t("dsh-rtui.density"),
-          children: h("select", { value: density, onChange: (e) => setDensity(e.target.value), style: selectStyle },
-            DENSITIES.map((c) => h("option", { key: c.id, value: c.id }, c.label))) }),
       );
     }
 
@@ -310,9 +290,6 @@ window.__ModuleLoader__.load({
       "dsh-rtui.preset": "主题预设",
       "dsh-rtui.accent": "强调色",
       "dsh-rtui.sidebarContrast": "侧栏对比度",
-      "dsh-rtui.font": "字体",
-      "dsh-rtui.radius": "圆角",
-      "dsh-rtui.density": "密度",
     };
     const en = {
       "dsh-rtui.title": "Custom theme",
@@ -320,33 +297,29 @@ window.__ModuleLoader__.load({
       "dsh-rtui.preset": "Preset",
       "dsh-rtui.accent": "Accent color",
       "dsh-rtui.sidebarContrast": "Sidebar contrast",
-      "dsh-rtui.font": "Font",
-      "dsh-rtui.radius": "Corner radius",
-      "dsh-rtui.density": "Density",
     };
 
-    // ── 结构性 CSS：token 覆盖不了的部分（字体/圆角/密度靠注入 CSS）──
-    // 注: 圆角/密度为最佳努力选择器，需目视微调。
-    function buildCss({ font, radius, density }) {
-      const fontStack = FONT_STACKS[font] || FONT_STACKS.system;
-      const radiusPx = RADIUS_PX[radius] || RADIUS_PX.medium;
-      const pad = DENSITY_PAD[density] || DENSITY_PAD.comfortable;
+    // ── 结构性 CSS：token 覆盖不了的部分 ──
+    function buildCss({ accent }) {
+      const ac = accent || "#4D6BFE";
       return `
 :root {
-  --ds-font-family-code: 'Cascadia Code', 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'PingFang SC', 'Microsoft YaHei';
   /* 顶部右侧为 frameless 窗口的 Windows 系统按钮预留空间,避让 dsh 头部工具区。 */
   --rtui-sysbar: 128px;
-  --rtui-radius: ${radiusPx};
-  --rtui-density-pad: ${pad};
+  --rtui-accent: ${ac};
 }
-/* 字体族覆盖 */
---dsw-font-family { font-family: ${fontStack} !important; }
-* { font-family: ${fontStack}; }
-code, pre, [class*="code"], [class*="Code"] { font-family: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace; }
-/* 圆角(最佳努力) */
-button, input, textarea, select, [role="button"], [class*="Card"], [class*="card"], [class*="bubble"], .menu { border-radius: var(--rtui-radius) !important; }
-/* 密度(最佳努力): 收敛常见行容器内边距 */
-[class*="Row"], [class*="Item"], [class*="Entry"], [class*="sidebar"] > * { padding-top: var(--rtui-density-pad) !important; padding-bottom: var(--rtui-density-pad) !important; }
+/* 焦点环(无障碍): 用强调色描边键盘焦点 */
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [role="button"]:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--rtui-accent); outline-offset: 2px; }
+/* 主题切换过渡: 颜色/背景/边框柔和过渡,避免瞬间跳变 */
+body, [class*="App"], [class*="Panel"], [class*="Card"], [class*="Row"], [class*="Item"], button, input, select, textarea { transition: background-color .18s ease, color .18s ease, border-color .18s ease; }
+/* 收起侧边栏: 侧栏颜色与主题底色一致 + 去掉右边框(macOS 下与红绿灯更协调)。
+   侧栏列根节点收起时带 collapsed 类(哈希后仍含字面量 "collapsed")；
+   右边框在布局网格列 [class*="sidebarCol"] 上,用 :has() 依据内部收起状态抹掉。 */
+[data-slot="sidebar"] > :first-child[class*="collapsed"],
+[class*="sidebarCol"]:has([data-slot="sidebar"] > :first-child[class*="collapsed"]) {
+  background: var(--dsw-alias-bg-base) !important;
+  border-right: none !important;
+}
 /* 滚动条细窄化 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { border-radius: 4px; }
@@ -388,9 +361,6 @@ button, input, textarea, select, [role="button"], [class*="Card"], [class*="card
           preset: user.preset || "graphite",
           accent: user.accent || "#4D6BFE",
           sidebarContrast: user.sidebarContrast || "slightly",
-          font: user.font || "system",
-          radius: user.radius || "medium",
-          density: user.density || "comfortable",
         };
         lastValues = values;
         applyTheme(values);
@@ -406,9 +376,6 @@ button, input, textarea, select, [role="button"], [class*="Card"], [class*="card
           setPreset: (v) => scope.set("preset", v),
           setAccent: (v) => scope.set("accent", v),
           setSidebarContrast: (v) => scope.set("sidebarContrast", v),
-          setFont: (v) => scope.set("font", v),
-          setRadius: (v) => scope.set("radius", v),
-          setDensity: (v) => scope.set("density", v),
         };
       };
       ctx.slots.inject("settings.general.item", () => ctx.slots.register({

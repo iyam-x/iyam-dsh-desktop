@@ -139,6 +139,9 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), String> {
                     // 此前放在 async_runtime 工作线程里调用，exit 信号未被主线程
                     // 事件循环处理，表现为点击「退出」无反应（而「打开 DSH」在主线程
                     // 同步执行，正常）。DSH 清理由 app.run 的 ExitRequested 处理器完成。
+                    // 这里先显式杀 DSH（守护线程独占 child 句柄后，exit 回调里的清理
+                    // 拿不到句柄，必须靠 dsh.pid 兜底杀 node），再退出。
+                    process_state::kill_dsh_on_exit();
                     app.clone().exit(0);
                 }
                 _ => {}
