@@ -39,6 +39,7 @@
       "bin/dsh-package",
       "bin/dsh-shell-plugin",
       "bin/dsh-rtui-ui",
+      "bin/dsh-file-handler",
       "bin/node",
       "icons"
     ]
