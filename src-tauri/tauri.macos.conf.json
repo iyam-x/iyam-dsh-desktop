@@ -1,4 +1,7 @@
 {
+  "bundle": {
+    "targets": ["dmg"]
+  },
   "app": {
     "macOSPrivateApi": true,
     "windows": [

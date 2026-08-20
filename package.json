@@ -7,16 +7,22 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri:dev": "node scripts/fetch-dsh.mjs && tauri dev",
+    "tauri:build": "node scripts/fetch-dsh.mjs && tauri build",
     "fetch:node": "node scripts/fetch-node.mjs"
   },
   "dependencies": {
+    "@codemirror/commands": "^6",
+    "@codemirror/language": "^6",
+    "@codemirror/language-data": "^6",
+    "@codemirror/state": "^6",
+    "@codemirror/theme-one-dark": "^6",
+    "@codemirror/view": "^6",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-notification": "^2",
     "@tauri-apps/plugin-shell": "^2",
     "@tauri-apps/plugin-store": "^2",
-    "highlight.js": "^11.12.0"
+    "codemirror": "^6"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

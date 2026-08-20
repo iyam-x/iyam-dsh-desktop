@@ -49,10 +49,11 @@ pub fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), 
     notification
         .summary(&title)
         .body(&body)
-        .auto_icon()
-        // toast 归属到与 aumid::register 一致的 AUMID（ai.iyam.dsh），
-        // 保证点击激活回调正确关联到本应用。
-        .app_id(&app.config().identifier);
+        .auto_icon();
+    // toast 归属到与 aumid::register 一致的 AUMID（ai.iyam.dsh），
+    // 保证点击激活回调正确关联到本应用。仅 Windows 的 toast 需要 AUMID。
+    #[cfg(windows)]
+    notification.app_id(&app.config().identifier);
 
     match notification.show() {
         Ok(handle) => {

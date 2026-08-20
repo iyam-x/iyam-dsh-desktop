@@ -1,10 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { TitleBar } from "./components/TitleBar";
-import hljs from "highlight.js/lib/common";
-import "highlight.js/styles/github-dark.css";
+import { PreviewDock, DEFAULT_THEME, type Preview, type ThemeState } from "./components/PreviewDock";
 import "./App.css";
 
 type AppStatus = "installing" | "loading" | "ready" | "crashed" | "error";
@@ -15,12 +14,6 @@ interface InstallState {
   port?: number;
   error?: string;
 }
-
-/** 文件内联预览状态（来自 DSH 的 dsh-file-handler 插件转发）。 */
-type Preview =
-  | { kind: "image" | "audio" | "video"; name: string; dataUrl: string }
-  | { kind: "text"; name: string; content: string }
-  | { kind: "error"; name: string; message: string };
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"]);
 const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac", "opus", "weba"]);
@@ -34,66 +27,23 @@ const MIME: Record<string, string> = {
   mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", m4v: "video/mp4",
 };
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
-}
+const DOCK_MIN = 320;
+const DOCK_MAX = 760;
+const DOCK_DEFAULT = 460;
+const DOCK_STORAGE_KEY = "iyam-dsh-dock-width";
 
-function PreviewOverlay({ preview, onClose }: { preview: Preview; onClose: () => void }) {
-  const isText = preview.kind === "text";
-
-  // 代码高亮（内容过大时跳过高亮只转义，避免卡死；读取仍是全量）
-  const highlighted = useMemo(() => {
-    if (preview.kind !== "text") return "";
-    if (preview.content.length > 1_000_000) return escapeHtml(preview.content);
-    try {
-      return hljs.highlightAuto(preview.content).value;
-    } catch {
-      return escapeHtml(preview.content);
+function loadDockWidth(): number {
+  try {
+    const raw = localStorage.getItem(DOCK_STORAGE_KEY);
+    if (raw) {
+      const n = parseInt(raw, 10);
+      if (!Number.isNaN(n)) return Math.min(DOCK_MAX, Math.max(DOCK_MIN, n));
     }
-  }, [preview]);
-
-  const gutter = useMemo(() => {
-    if (preview.kind !== "text") return "";
-    const n = preview.content.split("\n").length;
-    return Array.from({ length: n }, (_, i) => String(i + 1)).join("\n");
-  }, [preview]);
-
-  return (
-    <div className="preview-backdrop" onClick={onClose}>
-      <div className="preview-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="preview-head">
-          <span className="preview-name" title={preview.name}>
-            {preview.name}
-          </span>
-          <button type="button" className="preview-close" onClick={onClose} aria-label="关闭">
-            ✕
-          </button>
-        </div>
-        <div className="preview-body">
-          {preview.kind === "image" && (
-            <img className="preview-media" src={preview.dataUrl} alt={preview.name} />
-          )}
-          {preview.kind === "video" && (
-            <video className="preview-media" src={preview.dataUrl} controls autoPlay />
-          )}
-          {preview.kind === "audio" && (
-            <audio className="preview-audio" src={preview.dataUrl} controls autoPlay />
-          )}
-          {preview.kind === "text" && (
-            <div className="preview-code">
-              <pre className="preview-gutter">{gutter}</pre>
-              <pre className="preview-code-block">
-                <code className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />
-              </pre>
-            </div>
-          )}
-          {preview.kind === "error" && <div className="preview-error">{preview.message}</div>}
-        </div>
-      </div>
-    </div>
-  );
+  } catch {
+    /* localStorage 不可用时退回默认 */
+  }
+  return DOCK_DEFAULT;
 }
-
 
 export default function App() {
   const [state, setState] = useState<InstallState>({
@@ -101,6 +51,8 @@ export default function App() {
     message: "正在初始化...",
   });
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [theme, setTheme] = useState<ThemeState>(DEFAULT_THEME);
+  const [dockWidth, setDockWidth] = useState<number>(loadDockWidth);
   const closePreview = () => setPreview(null);
 
   // 打开 DSH 转发来的文件预览：按扩展名分图片/音视频(读二进制)与文本/代码(读全文)。
@@ -112,10 +64,10 @@ export default function App() {
         const data = await invoke<{ base64: string }>("read_file_data", { path });
         const kind = IMAGE_EXTS.has(ext) ? "image" : AUDIO_EXTS.has(ext) ? "audio" : "video";
         const mime = MIME[ext] || "application/octet-stream";
-        setPreview({ kind, name, dataUrl: `data:${mime};base64,${data.base64}` });
+        setPreview({ kind, name, path, dataUrl: `data:${mime};base64,${data.base64}` });
       } else {
         const data = await invoke<{ content: string }>("read_text_file", { path });
-        setPreview({ kind: "text", name, content: data.content });
+        setPreview({ kind: "text", name, path, content: data.content });
       }
     } catch (err) {
       setPreview({ kind: "error", name, message: String(err) });
@@ -232,6 +184,25 @@ export default function App() {
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
+  // DSH 主题同步：dsh-rtui-ui 插件把当前生效实色 postMessage 过来，
+  // 预览面板/编辑器据此着色，与 DSH 视觉统一（消除割裂感）。
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data as
+        | { source?: string; type?: string; dark?: boolean; accent?: string; colors?: ThemeState["colors"] }
+        | null;
+      if (!data || data.source !== "iyam-dsh-theme" || data.type !== "theme") return;
+      if (!data.colors || typeof data.accent !== "string") return;
+      setTheme({
+        dark: data.dark === true,
+        accent: data.accent,
+        colors: data.colors,
+      });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
   // Esc 关闭预览
   useEffect(() => {
     if (!preview) return;
@@ -242,11 +213,43 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [preview]);
 
+  // 开发者工具：F12 / Cmd(Ctrl)+Shift+I（壳聚焦时直接响应；DSH iframe 内聚焦时由
+  // dsh-rtui-ui 插件 postMessage 转发）。release 构建需 tauri `devtools` 特性。
+  useEffect(() => {
+    const openDevtools = () => void invoke("open_devtools");
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (e.key === "F12" || (mod && e.shiftKey && (e.key === "I" || e.key === "i"))) {
+        e.preventDefault();
+        openDevtools();
+      }
+    };
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data as { source?: string; type?: string } | null;
+      if (data?.source === "iyam-dsh" && data.type === "open-devtools") openDevtools();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("message", onMessage);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("message", onMessage);
+    };
+  }, []);
+
+  // 预览面板宽度变化：记忆到 localStorage，下次打开保持。
+  const handleResize = (w: number) => {
+    setDockWidth(w);
+    try {
+      localStorage.setItem(DOCK_STORAGE_KEY, String(w));
+    } catch {
+      /* 忽略持久化失败 */
+    }
+  };
+
   if (state.status === "error") {
     return (
       <div className="app-shell">
-        <TitleBar />
-        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
+        <TitleBar rightOffset={preview ? dockWidth : 0} />
         <div className="app error">
           <div className="error-card">
             <div className="error-icon">⚠</div>
@@ -267,8 +270,7 @@ export default function App() {
   if (state.status === "crashed") {
     return (
       <div className="app-shell">
-        <TitleBar />
-        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
+        <TitleBar rightOffset={preview ? dockWidth : 0} />
         <div className="app crashed">
           <div className="error-card">
             <div className="error-icon">⚡</div>
@@ -290,8 +292,7 @@ export default function App() {
   if (state.status === "installing") {
     return (
       <div className="app-shell">
-        <TitleBar />
-        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
+        <TitleBar rightOffset={preview ? dockWidth : 0} />
         <div className="app installing">
           <div className="install-card">
             <div className="spinner" />
@@ -309,8 +310,7 @@ export default function App() {
   if (state.status === "loading") {
     return (
       <div className="app-shell">
-        <TitleBar />
-        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
+        <TitleBar rightOffset={preview ? dockWidth : 0} />
         <div className="app loading">
           <div className="install-card">
             <div className="spinner" />
@@ -322,17 +322,27 @@ export default function App() {
     );
   }
 
-  // Ready — embed DSH web UI
+  // Ready — embed DSH web UI，预览作为右侧停靠面板与其同屏。
   return (
-      <div className="app-shell">
-        <TitleBar />
-        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
-        <div className="app ready">
+    <div className="app-shell">
+      <TitleBar rightOffset={preview ? dockWidth : 0} />
+      <div className="app ready">
         <iframe
           src={`http://127.0.0.1:${state.port}`}
           title="DeepSeek Harness"
           className="webview"
         />
+        {preview && (
+          <PreviewDock
+            preview={preview}
+            theme={theme}
+            width={dockWidth}
+            minWidth={DOCK_MIN}
+            maxWidth={DOCK_MAX}
+            onClose={closePreview}
+            onResize={handleResize}
+          />
+        )}
       </div>
     </div>
   );

@@ -7,58 +7,102 @@
   /* 与 .app.error 相同 */
 }
 
-/* ── 文件内联预览浮层（DSH dsh-file-handler 插件触发）── */
-.preview-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(10, 12, 18, 0.72);
-  backdrop-filter: blur(2px);
-}
-.preview-panel {
+/* ── 文件预览停靠面板（DSH dsh-file-handler 插件触发）──
+   右侧抽屉，与 DSH 会话同屏；颜色来自 DSH 主题同步的 CSS 变量，
+   左缘 2px 强调色竖线(accent rail)把预览锚定到应用主题。 */
+.preview-dock {
+  position: relative;
+  flex: none;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  width: min(860px, 92vw);
-  height: min(620px, 88vh);
-  background: #1b1f2b;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  background: var(--dock-bg, #161618);
+  border-left: 1px solid var(--dock-border, rgba(255, 255, 255, 0.1));
   overflow: hidden;
+}
+/* 标志性元素：左缘强调色竖线 */
+.preview-dock::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--dock-accent, #4d6bfe);
+  z-index: 2;
+}
+/* 拖拽调宽手柄（左缘） */
+.preview-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 3;
+}
+.preview-resize:hover {
+  background: var(--dock-accent, #4d6bfe);
+  opacity: 0.4;
 }
 .preview-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dock-border, rgba(255, 255, 255, 0.1));
   flex: none;
+  background: var(--dock-layer, #1e1e20);
 }
 .preview-name {
   font-size: 13px;
-  color: #e5e7eb;
+  color: var(--dock-label, #e9e9ec);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
 }
-.preview-close {
+.preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex: none;
+}
+.preview-save {
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--dock-accent, #4d6bfe);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.preview-save:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.preview-close {
   width: 26px;
   height: 26px;
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--dock-label2, #9b9ba1);
   font-size: 14px;
   cursor: pointer;
 }
 .preview-close:hover {
   background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  color: var(--dock-label, #e9e9ec);
+}
+.preview-error-bar {
+  flex: none;
+  padding: 6px 12px;
+  background: rgba(229, 72, 77, 0.18);
+  color: #f87171;
+  font-size: 12px;
+  word-break: break-all;
 }
 .preview-body {
   flex: 1;
@@ -66,7 +110,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #141824;
+  background: var(--dock-bg, #161618);
   overflow: hidden;
 }
 .preview-media {
@@ -77,43 +121,13 @@
 .preview-audio {
   width: min(520px, 80%);
 }
-/* 文本/代码：行号 + 高亮，同一滚动容器内垂直同步 */
-.preview-code {
+/* CodeMirror 挂载容器：撑满 body */
+.preview-code-host {
   width: 100%;
   height: 100%;
-  display: flex;
-  overflow: auto;
-  background: #181c27;
-  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-  font-size: 12.5px;
-  line-height: 1.55;
 }
-.preview-gutter {
-  flex: none;
-  position: sticky;
-  left: 0;
-  padding: 12px 8px 12px 12px;
-  margin: 0;
-  color: #565e73;
-  background: #161a24;
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
-  text-align: right;
-  user-select: none;
-}
-.preview-code-block {
-  flex: 1;
-  margin: 0;
-  padding: 12px 14px;
-  color: #d7dbe6;
-  overflow: visible;
-}
-.preview-code-block code {
-  font-family: inherit;
-  white-space: pre;
-}
-.preview-code-block .hljs {
-  background: transparent;
-  display: block;
+.preview-code-host .cm-editor {
+  height: 100%;
 }
 .preview-error {
   padding: 20px;

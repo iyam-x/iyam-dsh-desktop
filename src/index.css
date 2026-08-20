@@ -209,15 +209,18 @@ body,
   color: #a5b4fc;
 }
 
-/* Ready state — iframe fills window */
+/* Ready state — iframe 与预览面板并排（flex 行） */
 .app.ready {
   align-items: stretch;
   justify-content: stretch;
   background: #0f172a;
+  display: flex;
+  flex-direction: row;
 }
 
 .webview {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   height: 100%;
   border: none;
   background: white;

@@ -57,6 +57,16 @@ pub fn read_file_data(path: String) -> Result<DataPreview, String> {
     })
 }
 
+/// 写回文本/代码文件（预览面板编辑后保存）。覆盖原文件，不做备份。
+#[tauri::command]
+pub fn write_text_file(path: String, content: String) -> Result<(), String> {
+    let meta = std::fs::metadata(&path).map_err(|e| format!("读取文件信息失败: {}", e))?;
+    if !meta.is_file() {
+        return Err("不是文件".to_string());
+    }
+    std::fs::write(&path, content).map_err(|e| format!("写入文件失败: {}", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +115,24 @@ mod tests {
     fn missing_file_errors() {
         let path = std::env::temp_dir().join("iyam-dsh-no-such-file-xyz.png");
         assert!(read_file_data(path.to_string_lossy().into_owned()).is_err());
+    }
+
+    /// 写回链路：write_text_file → 再次 read_text_file 应得到相同内容（含中文）。
+    #[test]
+    fn write_then_read_round_trip() {
+        let content = "fn main() {\n    println!(\"你好\");\n}\n";
+        let path = temp_file("write.rs", b"old content");
+        write_text_file(path.to_string_lossy().into_owned(), content.to_string())
+            .expect("write_text_file 失败");
+        let preview = read_text_file(path.to_string_lossy().into_owned()).expect("read_text_file 失败");
+        assert_eq!(preview.content, content);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 写入不存在路径应报错而非 panic。
+    #[test]
+    fn write_missing_file_errors() {
+        let path = std::env::temp_dir().join("iyam-dsh-no-such-file-xyz.txt");
+        assert!(write_text_file(path.to_string_lossy().into_owned(), "x".to_string()).is_err());
     }
 }

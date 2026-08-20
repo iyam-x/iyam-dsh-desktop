@@ -47,7 +47,7 @@ async function showMacTitleBarMenu(isMax: boolean): Promise<void> {
   await menu.popup();
 }
 
-export function TitleBar() {
+export function TitleBar({ rightOffset = 0 }: { rightOffset?: number }) {
   const [maximized, setMaximized] = useState(false);
   const lastClickTime = useRef(0);
 
@@ -86,6 +86,7 @@ export function TitleBar() {
     return (
       <div
         className="title-bar title-bar--mac"
+        style={{ right: rightOffset }}
         onMouseDown={handleTitleBarMouseDown}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -100,6 +101,7 @@ export function TitleBar() {
   return (
     <div
       className="title-bar"
+      style={{ right: rightOffset }}
       onMouseDown={handleTitleBarMouseDown}
       onContextMenu={(e) => {
         e.preventDefault();

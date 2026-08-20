@@ -45,3 +45,13 @@ pub fn show_system_menu(window: tauri::Window) -> Result<(), String> {
 pub fn show_system_menu(_window: tauri::Window) -> Result<(), String> {
     Err("Native system menu is only available on Windows".into())
 }
+
+/// 打开主窗口的开发者工具（调试用）。release 构建需启用 tauri `devtools` 特性。
+#[tauri::command]
+pub fn open_devtools(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window("main") {
+        win.open_devtools();
+    }
+    Ok(())
+}

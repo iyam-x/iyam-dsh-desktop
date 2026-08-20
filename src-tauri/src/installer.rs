@@ -312,6 +312,46 @@ fn create_wrappers(home: &PathBuf, node: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// 读取 DSH 包根目录 package.json 的 version 字段（读不到返回 None）。
+fn package_version(dir: &PathBuf) -> Option<String> {
+    let content = fs::read_to_string(dir.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    v.get("version").and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+/// 每次启动校验内置 DSH 与 DSH_HOME 部署版本；不一致则干净重部署核心代码。
+///
+/// 背景：核心 dsh-package 只在首次安装时复制到 DSH_HOME，之后每次启动仅刷新三个
+/// 自定义插件，导致 bundle 升级（如 rc.6→rc.8）后 DSH_HOME 仍是旧核心——新资源
+/// （如剥掉 sourceMappingURL 的 client bundle）不生效。本函数对比版本并在不一致时
+/// 清掉旧代码目录（config/lib/node_modules）重新复制。用户数据不在 DSH_HOME 树内；
+/// bundle 不含 profiles/ 与 bin/，故已注册的插件配置和 bin/dsh wrapper 不受影响，
+/// 随后调用的 refresh_*_plugin 会重新装入自定义插件。
+pub(crate) fn refresh_dsh_core(app: &tauri::AppHandle) -> Result<(), String> {
+    let home = dsh_home();
+    let bundled = bundled_dsh_home(app).ok_or("内置 DSH 包未找到，请重新安装应用。")?;
+
+    let bundled_ver = package_version(&bundled);
+    let deployed_ver = package_version(&home);
+    if deployed_ver.is_some() && deployed_ver == bundled_ver {
+        return Ok(()); // 版本一致，无需重部署
+    }
+
+    log::info!("DSH 核心版本不一致（bundle={:?}, deployed={:?}），重新部署。", bundled_ver, deployed_ver);
+
+    for dir in ["config", "lib", "node_modules"] {
+        fs::remove_dir_all(home.join(dir)).ok();
+    }
+    fs::remove_file(home.join("package.json")).ok();
+
+    copy_dir_all(&bundled, &home).map_err(|e| format!("复制 DSH 包失败: {}", e))?;
+    if let Some(node) = bundled_node(app) {
+        create_wrappers(&home, &node)?;
+    }
+    log::info!("DSH 核心已从 bundle 重新部署（{bundled_ver:?}）。");
+    Ok(())
+}
+
 /// 每次启动刷新桌面壳插件（幂等）：把 bundle 内的插件覆盖安装到 DSH_HOME，
 /// 并确保注册到 web profile 的 bundles。旧安装因此也能获得桌面壳更新
 /// （布局 CSS、通知桥等）。

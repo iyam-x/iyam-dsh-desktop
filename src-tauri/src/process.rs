@@ -12,7 +12,7 @@ use regex::Regex;
 use tauri::Emitter;
 use tauri::Manager;
 
-use crate::installer::{bundled_node, dsh_home, get_install_status, InstallStatus};
+use crate::installer::{bundled_node, dsh_home, get_install_status, refresh_dsh_core, InstallStatus};
 use crate::process_state::DSH_CHILD;
 
 /// Start the DSH web server process and return the port.
@@ -31,6 +31,12 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     if get_install_status(app.clone()).await != InstallStatus::Installed {
         log::info!("DSH not installed yet, installing...");
         crate::installer::check_and_install(app.clone()).await?;
+    }
+
+    // 内置 DSH 核心版本与 DSH_HOME 部署版本不一致时重新部署（bundle 升级后旧核心
+    // 会残留，导致新资源不生效）。必须在入口校验、已运行早退、插件刷新之前执行。
+    if let Err(e) = refresh_dsh_core(&app) {
+        log::warn!("refresh dsh core failed: {}", e);
     }
 
     let bin_js = home.join("lib").join("bin.js");
@@ -87,7 +93,9 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
 
     let mut cmd = Command::new(&node);
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
-       .arg(&bin_js).arg("web").arg("--port").arg("0")
+       // --no-open：DSH 的 web 命令默认会在默认浏览器里打开 web UI；本应用自带 webview，
+       // 不需要浏览器，显式关闭（否则每次启动都会弹一个浏览器标签页）。
+       .arg(&bin_js).arg("web").arg("--no-open").arg("--port").arg("0")
        .stdout(Stdio::piped())
        .stderr(Stdio::piped())
        .stdin(Stdio::null());

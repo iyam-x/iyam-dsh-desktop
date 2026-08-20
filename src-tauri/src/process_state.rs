@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::process::Child;
 use std::sync::Mutex;

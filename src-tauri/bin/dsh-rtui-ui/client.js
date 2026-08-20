@@ -76,8 +76,13 @@ window.__ModuleLoader__.load({
       { id: "deeper", label: "更深" },
     ];
 
-    function withAlpha(hex, a) {
-      const m = hex.replace("#", "");
+    function withAlpha(c, a) {
+      const m = String(c).replace("#", "");
+      // "r,g,b" 形式（palette 的 borderRGB）直接拆解，避免被当十六进制解析产生错乱色值。
+      if (m.includes(",")) {
+        const [r, g, b] = m.split(",").map((x) => parseInt(x.trim(), 10) || 0);
+        return `rgba(${r}, ${g}, ${b}, ${a})`;
+      }
       const r = parseInt(m.slice(0, 2), 16);
       const g = parseInt(m.slice(2, 4), 16);
       const b = parseInt(m.slice(4, 6), 16);
@@ -134,13 +139,14 @@ window.__ModuleLoader__.load({
         "--dsw-alias-bg-module-platform": { light: L.layer3, dark: D.layer3 },
         "--dsw-alias-bg-skeleton": { light: "rgba(0,0,0,0.04)", dark: "rgba(255,255,255,0.08)" },
         // 边框
-        "--dsw-alias-border-l1": { light: withAlpha(L.borderRGB, 0.06), dark: withAlpha(D.borderRGB, 0.06) },
-        "--dsw-alias-border-l2": { light: withAlpha(L.borderRGB, 0.10), dark: withAlpha(D.borderRGB, 0.10) },
-        "--dsw-alias-border-l2-darkmode-thin": { light: withAlpha(L.borderRGB, 0.10), dark: withAlpha(D.borderRGB, 0.06) },
-        "--dsw-alias-border-l3": { light: withAlpha(L.borderRGB, 0.14), dark: withAlpha(D.borderRGB, 0.14) },
-        "--dsw-alias-border-l4": { light: withAlpha(L.borderRGB, 0.18), dark: withAlpha(D.borderRGB, 0.20) },
-        "--dsw-alias-border-inverted": { light: withAlpha(L.borderRGB, 0), dark: withAlpha(D.borderRGB, 0.06) },
-        "--dsw-alias-border-inverted2": { light: withAlpha(L.borderRGB, 0), dark: withAlpha(D.borderRGB, 0.08) },
+        // 边框（alpha 比原生略高，保证设置项分隔线清晰可见）
+        "--dsw-alias-border-l1": { light: withAlpha(L.borderRGB, 0.08), dark: withAlpha(D.borderRGB, 0.08) },
+        "--dsw-alias-border-l2": { light: withAlpha(L.borderRGB, 0.14), dark: withAlpha(D.borderRGB, 0.14) },
+        "--dsw-alias-border-l2-darkmode-thin": { light: withAlpha(L.borderRGB, 0.14), dark: withAlpha(D.borderRGB, 0.08) },
+        "--dsw-alias-border-l3": { light: withAlpha(L.borderRGB, 0.18), dark: withAlpha(D.borderRGB, 0.18) },
+        "--dsw-alias-border-l4": { light: withAlpha(L.borderRGB, 0.22), dark: withAlpha(D.borderRGB, 0.24) },
+        "--dsw-alias-border-inverted": { light: withAlpha(L.borderRGB, 0), dark: withAlpha(D.borderRGB, 0.08) },
+        "--dsw-alias-border-inverted2": { light: withAlpha(L.borderRGB, 0), dark: withAlpha(D.borderRGB, 0.10) },
         // 文字
         "--dsw-alias-label-primary": { light: L.label, dark: D.label },
         "--dsw-alias-label-secondary": { light: L.label2, dark: D.label2 },
@@ -332,6 +338,57 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
 `;
     }
 
+    // ── 主题同步给桌面壳 ──
+    // DSH 主题 token 注在 iframe 内部 DOM，壳(预览面板/编辑器)读不到；解析出当前生效
+    // 实色后 postMessage 给父窗口，壳据此着色，消除"预览像另一个 App"的割裂感。
+    function lum(c) {
+      c = (c || "").trim();
+      let r = 0, g = 0, b = 0;
+      if (c[0] === "#") {
+        const m = c.slice(1);
+        if (m.length === 3) { r = parseInt(m[0] + m[0], 16); g = parseInt(m[1] + m[1], 16); b = parseInt(m[2] + m[2], 16); }
+        else { r = parseInt(m.slice(0, 2), 16); g = parseInt(m.slice(2, 4), 16); b = parseInt(m.slice(4, 6), 16); }
+      } else if (c.startsWith("rgb")) {
+        const n = c.match(/\d+(\.\d+)?/g) || [0, 0, 0];
+        r = +n[0]; g = +n[1]; b = +n[2];
+      } else return 0.5;
+      const f = (x) => { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    }
+
+    function syncThemeToShell(values) {
+      const preset = values.preset || "graphite";
+      const p = PALETTES[preset] || PALETTES.graphite;
+      const accent = values.accent || "#4D6BFE";
+      const tokens = expandTokens(preset, { accent, sidebarContrast: values.sidebarContrast || "slightly" });
+      // dsh-client-ui-layout 把合成后的主题 token 写到 document.body.style（而非 :root），
+      // 故必须从 body 读取"已生效"实色——否则读到的只是 :root 上的官方基础主题，
+      // 自定义预设/强调色在壳侧（dock/编辑器）毫无反应。亮暗以 documentElement.style.colorScheme 为准。
+      let dark = document.documentElement.style.colorScheme === "dark";
+      const readVar = (name) => {
+        try { return getComputedStyle(document.body).getPropertyValue(name).trim(); } catch (_e) { return ""; }
+      };
+      const resolvedBg = readVar("--dsw-alias-bg-base");
+      // 兜底亮暗判定：用 body 上已解析的 bg-base 与 palette 亮/暗比对（colorScheme 不可用时）。
+      if (resolvedBg) {
+        const lr = lum(resolvedBg), ld = lum(p.dark.bg), ll = lum(p.light.bg);
+        dark = Math.abs(lr - ld) <= Math.abs(lr - ll);
+      }
+      const pick = (t) => (t && typeof t === "object") ? (dark ? t.dark : t.light) : t;
+      const eff = (name, fallback) => readVar(name) || fallback;
+      const colors = {
+        bg: eff("--dsw-alias-bg-base", pick(tokens["--dsw-alias-bg-base"])),
+        layer: eff("--dsw-alias-bg-layer-1", pick(tokens["--dsw-alias-bg-layer-1"])),
+        label: eff("--dsw-alias-label-primary", pick(tokens["--dsw-alias-label-primary"])),
+        label2: eff("--dsw-alias-label-secondary", pick(tokens["--dsw-alias-label-secondary"])),
+        border: eff("--dsw-alias-border-l2", pick(tokens["--dsw-alias-border-l2"])),
+      };
+      try {
+        console.log("[rtui] syncThemeToShell dark=", dark, "accent=", accent, "colors=", JSON.stringify(colors));
+        parent.postMessage({ source: "iyam-dsh-theme", type: "theme", dark, accent, colors }, "*");
+      } catch (_e) { /* 壳未就绪时静默 */ }
+    }
+
     let lastValues = null;
     function injectStyle() {
       if (!lastValues) return;
@@ -344,19 +401,36 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
     }
 
     function apply(ctx) {
+      console.log("[rtui] apply 被调用。ctx keys:", Object.keys(ctx).join(","));
+      console.log("[rtui] theme?.overrideTokens:", typeof ctx.theme?.overrideTokens, "| slots:", typeof ctx.slots, "| settingsScope:", typeof ctx.settingsScope);
       const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NS });
       ctx.locale.register(SETTINGS_NS, { zh, en });
       const store = createCustomStore();
       let bound;
       let disposeLayer = null;
+      let currentValues = null;
       const applyTheme = (values) => {
         if (disposeLayer) { disposeLayer(); disposeLayer = null; }
         if (values.enabled === false) return;
-        const tokens = expandTokens(values.preset, {
-          accent: values.accent || "#4D6BFE",
-          sidebarContrast: values.sidebarContrast || "slightly",
-        });
-        disposeLayer = ctx.theme.overrideTokens(THEME_SOURCE, tokens);
+        try {
+          const tokens = expandTokens(values.preset, {
+            accent: values.accent || "#4D6BFE",
+            sidebarContrast: values.sidebarContrast || "slightly",
+          });
+          disposeLayer = ctx.theme.overrideTokens(THEME_SOURCE, tokens);
+          console.log("[rtui] overrideTokens 成功:", Object.keys(tokens).length, "tokens, preset=", values.preset, "accent=", values.accent);
+        } catch (e) {
+          console.error("[rtui] applyTheme 失败:", e);
+        }
+      };
+      // 统一入口：记录当前值 + 应用主题 + 刷新结构性 CSS + 同步壳。既供快照应用，
+      // 也供设置面板动作的"乐观应用"——立即生效，不依赖 host 写→读→subscribe 往返。
+      const applyValues = (values) => {
+        currentValues = values;
+        lastValues = values;
+        applyTheme(values);
+        injectStyle();
+        syncThemeToShell(values);
       };
       const applyFromSnapshot = (snap) => {
         const user = (snap && snap.user) || {};
@@ -366,20 +440,43 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
           accent: user.accent || "#4D6BFE",
           sidebarContrast: user.sidebarContrast || "slightly",
         };
-        lastValues = values;
-        applyTheme(values);
-        injectStyle();
+        console.log("[rtui] applyFromSnapshot rev=", snap && snap.revision, "user=", JSON.stringify(user), "→ values=", JSON.stringify(values));
+        applyValues(values);
         bound?.sync(values, snap ? snap.revision : -1);
       };
-      scope.subscribe(applyFromSnapshot);
+      // 运行时契约 subscribe 的回调为 () => void（不传参）。必须自行读取最新快照，
+      // 否则 live 修改会被兜底默认值覆盖，表现为"自定义主题没反应"。
+      scope.subscribe(() => {
+        const snap = scope.getSnapshot();
+        console.log("[rtui] subscribe 触发 rev=", snap && snap.revision, "user=", JSON.stringify(snap && snap.user));
+        applyFromSnapshot(snap);
+      });
+      // 乐观应用：在写 host 之前先按新值刷新主题，保证用户一操作就立即看到变化。
+      const optimistic = (patch) => {
+        applyValues({
+          enabled: true, preset: "graphite", accent: "#4D6BFE", sidebarContrast: "slightly",
+          ...(currentValues || {}),
+          ...patch,
+        });
+      };
       const injected = (actions) => {
         bound = actions;
         applyFromSnapshot(scope.getSnapshot());
+        // 兜底：壳(父窗口)可能错过首条主题消息，iframe 完全加载后再补发一次，
+        // 保证预览面板拿到初始主题。
+        const resend = () => syncThemeToShell({
+          enabled: true,
+          preset: scope.getSnapshot().user?.preset || "graphite",
+          accent: scope.getSnapshot().user?.accent || "#4D6BFE",
+          sidebarContrast: scope.getSnapshot().user?.sidebarContrast || "slightly",
+        });
+        if (document.readyState === "complete") resend();
+        else window.addEventListener("load", resend, { once: true });
         return {
-          setEnabled: (v) => scope.set("enabled", v),
-          setPreset: (v) => scope.set("preset", v),
-          setAccent: (v) => scope.set("accent", v),
-          setSidebarContrast: (v) => scope.set("sidebarContrast", v),
+          setEnabled: (v) => { optimistic({ enabled: v }); scope.set("enabled", v); },
+          setPreset: (v) => { optimistic({ preset: v }); scope.set("preset", v); },
+          setAccent: (v) => { optimistic({ accent: v }); scope.set("accent", v); },
+          setSidebarContrast: (v) => { optimistic({ sidebarContrast: v }); scope.set("sidebarContrast", v); },
         };
       };
       ctx.slots.inject("settings.general.item", () => ctx.slots.register({
@@ -397,4 +494,16 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
     exports.inject = ["theme", "slots", "locale", "settingsScope", "connection", "remote"];
     return module.exports;
   },
+});
+
+// 开发者工具转发：焦点在 DSH iframe 内时，F12 / Cmd(Ctrl)+Shift+I 走 postMessage
+// 交给桌面壳打开 webview 的 devtools（跨域 iframe 内无法直接调用 Tauri API）。
+window.addEventListener("keydown", (e) => {
+  const mod = e.metaKey || e.ctrlKey;
+  if (e.key === "F12" || (mod && e.shiftKey && (e.key === "I" || e.key === "i"))) {
+    e.preventDefault();
+    try {
+      parent.postMessage({ source: "iyam-dsh", type: "open-devtools" }, "*");
+    } catch (_e) { /* 壳未就绪时忽略 */ }
+  }
 });

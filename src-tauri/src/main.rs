@@ -23,6 +23,13 @@ fn main() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // macOS：替换默认菜单栏（默认菜单含 Reload/DevTools/缩放/帮助等无用项），
+            // 只保留应用/编辑/窗口三个子菜单。Windows/Linux 无系统菜单栏，不设置。
+            #[cfg(target_os = "macos")]
+            {
+                let menu = build_app_menu(app.handle())?;
+                app.set_menu(menu)?;
+            }
             // Windows：注册 AUMID（注册表登记 + 进程级 AUMID），toast 归属与任务栏分组必须。
             aumid::register(app.handle());
             create_tray(&app.app_handle())?;
@@ -44,10 +51,12 @@ fn main() {
             process::stop_dsh,
             updater::check_for_update,
             window::show_system_menu,
+            window::open_devtools,
             tray_commands::restart_dsh,
             notify::notify,
             file_preview::read_text_file,
             file_preview::read_file_data,
+            file_preview::write_text_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -80,6 +89,55 @@ mod tray_commands {
         start_dsh(app).await?;
         Ok(())
     }
+}
+
+/// 精简 macOS 应用菜单：替换默认菜单（含 Reload / Force Reload / Toggle DevTools /
+/// 缩放 / 全屏 / 帮助等对本应用无用的项）。只保留三个子菜单：
+///  - 应用：关于 / 隐藏 / 隐藏其他 / 全部显示 / 退出
+///  - 编辑：撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选（webview 输入框的 Cmd 快捷键依赖它）
+///  - 窗口：最小化 / 缩放
+#[cfg(target_os = "macos")]
+fn build_app_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
+    use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
+
+    let app_sub = Submenu::with_items(
+        app,
+        "iyam-dsh",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, Some("关于 iyam-dsh"), None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, Some("隐藏 iyam-dsh"))?,
+            &PredefinedMenuItem::hide_others(app, Some("隐藏其他"))?,
+            &PredefinedMenuItem::show_all(app, Some("全部显示"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, Some("退出 iyam-dsh"))?,
+        ],
+    )?;
+    let edit_sub = Submenu::with_items(
+        app,
+        "编辑",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, Some("撤销"))?,
+            &PredefinedMenuItem::redo(app, Some("重做"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, Some("剪切"))?,
+            &PredefinedMenuItem::copy(app, Some("复制"))?,
+            &PredefinedMenuItem::paste(app, Some("粘贴"))?,
+            &PredefinedMenuItem::select_all(app, Some("全选"))?,
+        ],
+    )?;
+    let window_sub = Submenu::with_items(
+        app,
+        "窗口",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, Some("最小化"))?,
+            &PredefinedMenuItem::maximize(app, Some("最大化"))?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_sub, &edit_sub, &window_sub])
 }
 
 /// 创建系统托盘
