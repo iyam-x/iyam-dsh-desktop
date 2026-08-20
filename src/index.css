@@ -209,8 +209,9 @@ body,
   color: #a5b4fc;
 }
 
-/* Ready state — iframe 与预览面板并排（flex 行） */
+/* Ready state — iframe 全宽，预览面板悬浮覆盖在右侧（不挤压 DSH，resize 不触发 reflow） */
 .app.ready {
+  position: relative;
   align-items: stretch;
   justify-content: stretch;
   background: #0f172a;

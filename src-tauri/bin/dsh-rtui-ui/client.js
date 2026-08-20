@@ -441,6 +441,21 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
         const snap = scope.getSnapshot();
         applyFromSnapshot(snap);
       });
+      // 壳请求主题：预览 dock 打开时壳 postMessage 过来，立即回发当前主题，
+      // 消除"dock 已打开但还没收到首条主题消息"的时序问题。
+      window.addEventListener("message", (e) => {
+        const d = e.data;
+        if (!d || d.source !== "iyam-dsh" || d.type !== "request-theme") return;
+        try {
+          const user = scope.getSnapshot().user || {};
+          syncThemeToShell({
+            enabled: user.enabled !== false,
+            preset: user.preset || "graphite",
+            accent: user.accent || "#4D6BFE",
+            sidebarContrast: user.sidebarContrast || "slightly",
+          });
+        } catch (_e) { /* 快照不可用时静默 */ }
+      });
       // 乐观应用：在写 host 之前先按新值刷新主题，保证用户一操作就立即看到变化。
       const optimistic = (patch) => {
         applyValues({

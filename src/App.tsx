@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { TitleBar } from "./components/TitleBar";
 import { PreviewDock, DEFAULT_THEME, type Preview, type ThemeState } from "./components/PreviewDock";
 import "./App.css";
@@ -53,10 +53,17 @@ export default function App() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [theme, setTheme] = useState<ThemeState>(DEFAULT_THEME);
   const [dockWidth, setDockWidth] = useState<number>(loadDockWidth);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const closePreview = () => setPreview(null);
 
   // 打开 DSH 转发来的文件预览：按扩展名分图片/音视频(读二进制)与文本/代码(读全文)。
   async function openPreview(path: string) {
+    // 向 DSH iframe 请求一次当前主题（dsh-rtui-ui 收到后回发），
+    // 保证 dock 一打开就跟随主题，不受首次消息时序影响。
+    iframeRef.current?.contentWindow?.postMessage(
+      { source: "iyam-dsh", type: "request-theme" },
+      "*"
+    );
     const name = path.split(/[\\/]/).pop() || path;
     const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
     try {
@@ -331,6 +338,7 @@ export default function App() {
           src={`http://127.0.0.1:${state.port}`}
           title="DeepSeek Harness"
           className="webview"
+          ref={iframeRef}
         />
         {preview && (
           <PreviewDock

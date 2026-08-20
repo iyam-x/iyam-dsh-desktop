@@ -190,19 +190,33 @@ export function PreviewDock({
 
   const startResize = (e: ReactPointerEvent) => {
     e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    // setPointerCapture：把后续 pointermove/pointerup 都定向到本元素。
+    // 否则鼠标快速移出手柄/窗口后事件不再到达，拖拽"丢失"、且 pointerup 也收不到
+    // （表现为松手后鼠标回来仍在调宽）。捕获后无论指针在哪都收得到，松手必触发 up。
+    handle.setPointerCapture(e.pointerId);
     const startX = e.clientX;
     const startW = width;
+    let raf = 0;
     const onMove = (ev: PointerEvent) => {
-      // 面板在右侧，向左拖拽 → 宽度增大。
-      const next = Math.min(maxWidth, Math.max(minWidth, startW + (startX - ev.clientX)));
-      onResize(next);
+      const cx = ev.clientX;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        // 面板在右侧，向左拖拽 → 宽度增大。
+        const next = Math.min(maxWidth, Math.max(minWidth, startW + (startX - cx)));
+        onResize(next);
+      });
     };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+    const onUp = (ev: PointerEvent) => {
+      cancelAnimationFrame(raf);
+      if (handle.hasPointerCapture(ev.pointerId)) handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
     };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
   };
 
   const handleSave = async () => {

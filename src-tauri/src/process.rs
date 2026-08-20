@@ -164,12 +164,24 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         None
     });
 
-    // Drain stderr（只传 stderr pipe）
+    // Drain stderr（只传 stderr pipe），并落盘便于排查 DSH 行为
+    let stderr_log = home.join("dsh-stderr.log");
     std::thread::spawn(move || {
+        use std::io::Write;
         let reader = BufReader::new(stderr);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_log)
+            .ok();
         for line in reader.lines() {
             match line {
-                Ok(l) => log::info!("[dsh] {}", l),
+                Ok(l) => {
+                    log::info!("[dsh] {}", l);
+                    if let Some(f) = file.as_mut() {
+                        let _ = writeln!(f, "{}", l);
+                    }
+                }
                 Err(_) => break,
             }
         }

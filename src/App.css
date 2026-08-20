@@ -8,16 +8,20 @@
 }
 
 /* ── 文件预览停靠面板（DSH dsh-file-handler 插件触发）──
-   右侧抽屉，与 DSH 会话同屏；颜色来自 DSH 主题同步的 CSS 变量，
-   左缘 2px 强调色竖线(accent rail)把预览锚定到应用主题。 */
+   悬浮覆盖在 DSH 页面右侧（absolute），不挤压 iframe；
+   颜色来自 DSH 主题同步的 CSS 变量，左缘 2px 强调色竖线(accent rail)锚定应用主题。 */
 .preview-dock {
-  position: relative;
-  flex: none;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
   height: 100%;
+  z-index: 50;
   display: flex;
   flex-direction: column;
   background: var(--dock-bg, #161618);
   border-left: 1px solid var(--dock-border, rgba(255, 255, 255, 0.1));
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
   overflow: hidden;
 }
 /* 标志性元素：左缘强调色竖线 */
@@ -39,6 +43,7 @@
   left: -3px;
   width: 6px;
   cursor: col-resize;
+  touch-action: none;
   z-index: 3;
 }
 .preview-resize:hover {
