@@ -320,6 +320,10 @@ body, [class*="App"], [class*="Panel"], [class*="Card"], [class*="Row"], [class*
   background: var(--dsw-alias-bg-base) !important;
   border-right: none !important;
 }
+/* 上下文用量环(对话头部圆形按钮): 已用弧线用强调色,未用轨道保持淡灰,强化对比。
+   已用弧是唯一带 stroke-dasharray 的 circle,以此稳定选中;轨道用 _track 后缀类。 */
+svg circle[stroke-dasharray] { stroke: var(--rtui-accent) !important; }
+svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
 /* 滚动条细窄化 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { border-radius: 4px; }

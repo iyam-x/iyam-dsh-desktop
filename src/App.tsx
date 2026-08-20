@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { TitleBar } from "./components/TitleBar";
+import hljs from "highlight.js/lib/common";
+import "highlight.js/styles/github-dark.css";
 import "./App.css";
 
 type AppStatus = "installing" | "loading" | "ready" | "crashed" | "error";
@@ -14,11 +16,111 @@ interface InstallState {
   error?: string;
 }
 
+/** 文件内联预览状态（来自 DSH 的 dsh-file-handler 插件转发）。 */
+type Preview =
+  | { kind: "image" | "audio" | "video"; name: string; dataUrl: string }
+  | { kind: "text"; name: string; content: string }
+  | { kind: "error"; name: string; message: string };
+
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"]);
+const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac", "opus", "weba"]);
+const VIDEO_EXTS = new Set(["mp4", "webm", "mov", "m4v"]);
+
+const MIME: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+  webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp", avif: "image/avif", ico: "image/x-icon",
+  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", oga: "audio/ogg", m4a: "audio/mp4",
+  flac: "audio/flac", aac: "audio/aac", opus: "audio/opus", weba: "audio/webm",
+  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", m4v: "video/mp4",
+};
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
+}
+
+function PreviewOverlay({ preview, onClose }: { preview: Preview; onClose: () => void }) {
+  const isText = preview.kind === "text";
+
+  // 代码高亮（内容过大时跳过高亮只转义，避免卡死；读取仍是全量）
+  const highlighted = useMemo(() => {
+    if (preview.kind !== "text") return "";
+    if (preview.content.length > 1_000_000) return escapeHtml(preview.content);
+    try {
+      return hljs.highlightAuto(preview.content).value;
+    } catch {
+      return escapeHtml(preview.content);
+    }
+  }, [preview]);
+
+  const gutter = useMemo(() => {
+    if (preview.kind !== "text") return "";
+    const n = preview.content.split("\n").length;
+    return Array.from({ length: n }, (_, i) => String(i + 1)).join("\n");
+  }, [preview]);
+
+  return (
+    <div className="preview-backdrop" onClick={onClose}>
+      <div className="preview-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="preview-head">
+          <span className="preview-name" title={preview.name}>
+            {preview.name}
+          </span>
+          <button type="button" className="preview-close" onClick={onClose} aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <div className="preview-body">
+          {preview.kind === "image" && (
+            <img className="preview-media" src={preview.dataUrl} alt={preview.name} />
+          )}
+          {preview.kind === "video" && (
+            <video className="preview-media" src={preview.dataUrl} controls autoPlay />
+          )}
+          {preview.kind === "audio" && (
+            <audio className="preview-audio" src={preview.dataUrl} controls autoPlay />
+          )}
+          {preview.kind === "text" && (
+            <div className="preview-code">
+              <pre className="preview-gutter">{gutter}</pre>
+              <pre className="preview-code-block">
+                <code className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />
+              </pre>
+            </div>
+          )}
+          {preview.kind === "error" && <div className="preview-error">{preview.message}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function App() {
   const [state, setState] = useState<InstallState>({
     status: "loading",
     message: "正在初始化...",
   });
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const closePreview = () => setPreview(null);
+
+  // 打开 DSH 转发来的文件预览：按扩展名分图片/音视频(读二进制)与文本/代码(读全文)。
+  async function openPreview(path: string) {
+    const name = path.split(/[\\/]/).pop() || path;
+    const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+    try {
+      if (IMAGE_EXTS.has(ext) || AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext)) {
+        const data = await invoke<{ base64: string }>("read_file_data", { path });
+        const kind = IMAGE_EXTS.has(ext) ? "image" : AUDIO_EXTS.has(ext) ? "audio" : "video";
+        const mime = MIME[ext] || "application/octet-stream";
+        setPreview({ kind, name, dataUrl: `data:${mime};base64,${data.base64}` });
+      } else {
+        const data = await invoke<{ content: string }>("read_text_file", { path });
+        setPreview({ kind: "text", name, content: data.content });
+      }
+    } catch (err) {
+      setPreview({ kind: "error", name, message: String(err) });
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -118,10 +220,33 @@ export default function App() {
     };
   }, []);
 
+  // DSH 文件内联预览桥：dsh-file-handler 插件把文件点击转发到这里，按类型读取并展示
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data as { source?: string; type?: string; path?: string } | null;
+      if (!data || data.source !== "iyam-dsh-file" || data.type !== "file-open") return;
+      if (typeof data.path !== "string" || !data.path) return;
+      void openPreview(data.path);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  // Esc 关闭预览
+  useEffect(() => {
+    if (!preview) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPreview(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [preview]);
+
   if (state.status === "error") {
     return (
       <div className="app-shell">
         <TitleBar />
+        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
         <div className="app error">
           <div className="error-card">
             <div className="error-icon">⚠</div>
@@ -143,6 +268,7 @@ export default function App() {
     return (
       <div className="app-shell">
         <TitleBar />
+        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
         <div className="app crashed">
           <div className="error-card">
             <div className="error-icon">⚡</div>
@@ -165,6 +291,7 @@ export default function App() {
     return (
       <div className="app-shell">
         <TitleBar />
+        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
         <div className="app installing">
           <div className="install-card">
             <div className="spinner" />
@@ -183,6 +310,7 @@ export default function App() {
     return (
       <div className="app-shell">
         <TitleBar />
+        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
         <div className="app loading">
           <div className="install-card">
             <div className="spinner" />
@@ -196,9 +324,10 @@ export default function App() {
 
   // Ready — embed DSH web UI
   return (
-    <div className="app-shell">
-      <TitleBar />
-      <div className="app ready">
+      <div className="app-shell">
+        <TitleBar />
+        {preview && <PreviewOverlay preview={preview} onClose={closePreview} />}
+        <div className="app ready">
         <iframe
           src={`http://127.0.0.1:${state.port}`}
           title="DeepSeek Harness"

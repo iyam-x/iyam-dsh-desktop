@@ -1,0 +1,5 @@
+# iyam-dsh 文件查看插件：作为 web profile 的一个 bundle 被加载。
+# 服务端 node 半边为空实现，实际逻辑在 client.js（包装 workspaces.openPath）。
+- insert:
+    - id: dsh-file-handler
+      name: '@iyam/dsh-file-handler'

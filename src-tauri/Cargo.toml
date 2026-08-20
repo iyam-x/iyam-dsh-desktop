@@ -18,6 +18,8 @@ tauri-plugin-notification = "2"
 # 直接弹 toast 并接管点击激活回调（tauri-plugin-notification 丢弃了激活句柄，
 # 点击通知无法把窗口带到前台）。与插件同版本，无新增编译。
 notify-rust = "4"
+# 文件内联预览：二进制读取转 base64 data URL
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros"] }

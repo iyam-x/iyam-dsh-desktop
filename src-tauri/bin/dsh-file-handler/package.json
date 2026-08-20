@@ -1,0 +1,23 @@
+{
+  "name": "@iyam/dsh-file-handler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "iyam-dsh 文件查看插件：包装 workspaces.openPath，图片/媒体/文本/代码转发桌面壳做内联预览",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-runtime"]
+    }
+  }
+}

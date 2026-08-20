@@ -181,8 +181,37 @@ pub(crate) fn bundled_rtui_ui_plugin(app: &tauri::AppHandle) -> Option<PathBuf> 
     None
 }
 
-pub(crate) fn dsh_home() -> PathBuf {
-    DSH_HOME.get().cloned().unwrap_or_else(|| {
+/// 定位 bundle 内的文件查看插件包（包装 workspaces.openPath，转发文件点击给桌面壳预览）。
+/// 与 dsh-rtui-ui 同构：client 入口在根目录 client.js。
+pub(crate) fn bundled_file_handler_plugin(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // 1. Production: <app>/Contents/Resources/bin/dsh-file-handler
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let candidate = res_dir.join("bin").join("dsh-file-handler");
+        if candidate.join("client.js").exists() && candidate.join("package.json").exists() {
+            return Some(candidate);
+        }
+    }
+    // 2. Dev build: build.rs 复制到 exe 同级 target/{profile}/dsh-file-handler
+    if let Some(candidate) =
+        exe_dir_candidate("dsh-file-handler", |p| p.join("client.js").exists() && p.join("package.json").exists())
+    {
+        return Some(candidate);
+    }
+    // 3. 源码树回退（cwd 可能是项目根或 src-tauri）
+    if let Ok(cwd) = env::current_dir() {
+        for candidate in [
+            cwd.join("src-tauri").join("bin").join("dsh-file-handler"),
+            cwd.join("bin").join("dsh-file-handler"),
+        ] {
+            if candidate.join("client.js").exists() && candidate.join("package.json").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn dsh_home() -> PathBuf {    DSH_HOME.get().cloned().unwrap_or_else(|| {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         home.join(".iyam-dsh")
     })
@@ -239,6 +268,13 @@ pub async fn check_and_install(app: tauri::AppHandle) -> Result<InstallStatus, S
     if let Some(plugin) = bundled_rtui_ui_plugin(&app) {
         if let Err(e) = install_rtui_ui_plugin(&home, &plugin) {
             log::warn!("install rtui-ui plugin failed: {}", e);
+        }
+    }
+
+    // 安装文件查看插件（包装 openPath，转发文件点击给桌面壳做内联预览）。失败不阻断安装。
+    if let Some(plugin) = bundled_file_handler_plugin(&app) {
+        if let Err(e) = install_file_handler_plugin(&home, &plugin) {
+            log::warn!("install file-handler plugin failed: {}", e);
         }
     }
 
@@ -373,6 +409,57 @@ fn install_rtui_ui_plugin(home: &PathBuf, plugin: &PathBuf) -> Result<(), String
         .ok_or("profile 配置缺少 dsh.profile.bundles")?;
     if !bundles.iter().any(|b| b.as_str() == Some("@iyam/dsh-rtui-ui")) {
         bundles.push(serde_json::Value::String("@iyam/dsh-rtui-ui".into()));
+    }
+
+    let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化 profile 配置失败: {}", e))?;
+    fs::write(&profile_pkg, out + "\n").map_err(|e| format!("写入 profile 配置失败: {}", e))?;
+
+    Ok(())
+}
+
+/// 每次启动刷新文件查看插件（幂等）：把 bundle 内的插件覆盖安装到 DSH_HOME，
+/// 并确保注册到 web profile 的 bundles。旧安装因此也能获得文件预览更新的能力。
+pub(crate) fn refresh_file_handler_plugin(app: &tauri::AppHandle) -> Result<(), String> {
+    let home = dsh_home();
+    if let Some(plugin) = bundled_file_handler_plugin(app) {
+        install_file_handler_plugin(&home, &plugin)
+    } else {
+        Ok(())
+    }
+}
+
+/// 安装文件查看插件：
+/// 1. 复制到 <DSH_HOME>/node_modules/@iyam/dsh-file-handler
+/// 2. 注册到 <DSH_HOME>/profiles/web/package.json 的 dsh.profile.bundles（幂等）
+fn install_file_handler_plugin(home: &PathBuf, plugin: &PathBuf) -> Result<(), String> {
+    let dest = home.join("node_modules").join("@iyam").join("dsh-file-handler");
+    copy_dir_all(plugin, &dest).map_err(|e| format!("复制文件查看插件失败: {}", e))?;
+
+    let profile_pkg = home.join("profiles").join("web").join("package.json");
+    let mut v: serde_json::Value = if profile_pkg.exists() {
+        let content = fs::read_to_string(&profile_pkg).map_err(|e| format!("读取 profile 配置失败: {}", e))?;
+        serde_json::from_str(&content).map_err(|e| format!("解析 profile 配置失败: {}", e))?
+    } else {
+        if let Some(parent) = profile_pkg.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建 profile 目录失败: {}", e))?;
+        }
+        serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dependencies": {},
+            "dsh": {
+                "profile": {
+                    "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
+                }
+            }
+        })
+    };
+
+    let bundles = v["dsh"]["profile"]["bundles"]
+        .as_array_mut()
+        .ok_or("profile 配置缺少 dsh.profile.bundles")?;
+    if !bundles.iter().any(|b| b.as_str() == Some("@iyam/dsh-file-handler")) {
+        bundles.push(serde_json::Value::String("@iyam/dsh-file-handler".into()));
     }
 
     let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化 profile 配置失败: {}", e))?;

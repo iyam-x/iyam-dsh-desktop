@@ -6,3 +6,119 @@
 .app.crashed {
   /* 与 .app.error 相同 */
 }
+
+/* ── 文件内联预览浮层（DSH dsh-file-handler 插件触发）── */
+.preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 12, 18, 0.72);
+  backdrop-filter: blur(2px);
+}
+.preview-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 92vw);
+  height: min(620px, 88vh);
+  background: #1b1f2b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex: none;
+}
+.preview-name {
+  font-size: 13px;
+  color: #e5e7eb;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.preview-close {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 14px;
+  cursor: pointer;
+}
+.preview-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #141824;
+  overflow: hidden;
+}
+.preview-media {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.preview-audio {
+  width: min(520px, 80%);
+}
+/* 文本/代码：行号 + 高亮，同一滚动容器内垂直同步 */
+.preview-code {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  overflow: auto;
+  background: #181c27;
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.preview-gutter {
+  flex: none;
+  position: sticky;
+  left: 0;
+  padding: 12px 8px 12px 12px;
+  margin: 0;
+  color: #565e73;
+  background: #161a24;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  text-align: right;
+  user-select: none;
+}
+.preview-code-block {
+  flex: 1;
+  margin: 0;
+  padding: 12px 14px;
+  color: #d7dbe6;
+  overflow: visible;
+}
+.preview-code-block code {
+  font-family: inherit;
+  white-space: pre;
+}
+.preview-code-block .hljs {
+  background: transparent;
+  display: block;
+}
+.preview-error {
+  padding: 20px;
+  color: #f87171;
+  font-size: 13px;
+  max-width: 100%;
+  word-break: break-all;
+}

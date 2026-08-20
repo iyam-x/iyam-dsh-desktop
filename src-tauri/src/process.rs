@@ -38,6 +38,25 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         return Err(format!("DSH 入口文件不存在: {:?}", bin_js));
     }
 
+    // 内置插件刷新（幂等）必须在"已运行早退"之前执行，否则 DSH 已在运行时新插件永远装不上。
+    // needs_dsh_restart：文件查看插件是最近新增的内置插件；刷新前它不在 DSH_HOME，
+    // 说明运行中的 DSH 早于当前构建（未加载我们的插件集）→ 下方检测到已运行时会杀掉重启。
+    let needs_dsh_restart = !home
+        .join("node_modules")
+        .join("@iyam")
+        .join("dsh-file-handler")
+        .join("client.js")
+        .exists();
+    if let Err(e) = crate::installer::refresh_shell_plugin(&app) {
+        log::warn!("refresh shell plugin failed: {}", e);
+    }
+    if let Err(e) = crate::installer::refresh_rtui_ui_plugin(&app) {
+        log::warn!("refresh rtui-ui plugin failed: {}", e);
+    }
+    if let Err(e) = crate::installer::refresh_file_handler_plugin(&app) {
+        log::warn!("refresh file-handler plugin failed: {}", e);
+    }
+
     // Check if already running via PID file
     let pid_file = home.join("dsh.pid");
     if pid_file.exists() {
@@ -45,15 +64,16 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
             if is_process_alive(pid) {
                 let port_file = home.join("dsh.port");
-                if port_file.exists() {
+                if !needs_dsh_restart && port_file.exists() {
                     if let Ok(port_str) = fs::read_to_string(&port_file) {
                         if let Ok(port) = port_str.trim().parse::<u16>() {
                             let _ = app.emit("dsh-port-ready", port);
                             return Ok(port);
                         }
-                        kill_process(pid);
                     }
                 }
+                // 端口不可用，或插件集过期（needs_dsh_restart）→ 杀掉旧进程，走下方全新 spawn
+                kill_process(pid);
             }
         }
     }
@@ -64,14 +84,6 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     crate::installer::ensure_taskbar_preload(&home)?;
     // 为目录选择器 worker 打 owner 补丁（幂等），使对话框归入主窗口任务栏按钮
     crate::installer::ensure_picker_owner_patch(&home);
-    // 每次启动刷新桌面壳插件（幂等），旧安装也能获得布局/通知桥更新
-    if let Err(e) = crate::installer::refresh_shell_plugin(&app) {
-        log::warn!("refresh shell plugin failed: {}", e);
-    }
-    // 每次启动刷新主题 UI 插件（幂等），旧安装也能获得主题预设/控件的更新
-    if let Err(e) = crate::installer::refresh_rtui_ui_plugin(&app) {
-        log::warn!("refresh rtui-ui plugin failed: {}", e);
-    }
 
     let mut cmd = Command::new(&node);
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
