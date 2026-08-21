@@ -31,16 +31,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: pnpm
+          node-version: 22
+
+      # 不用 pnpm/action-setup（指定大版本范围且无 packageManager 字段时会触发
+      # `pnpm store path` 失败）；直接用 npm 安装 pnpm，简单可靠。
+      - name: Install pnpm
+        run: npm install -g pnpm@9
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
