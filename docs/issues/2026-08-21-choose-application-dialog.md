@@ -63,6 +63,13 @@ DSH **首次**发起带**代码块**的问答、回答完成时，macOS 弹出�
 - 三个自定义插件（file-handler/shell/rtui-ui）只做拦截/布局/通知/主题，无原生打开调用，**不是触发源**。
 - `dsh-host-frontend-static` 对未知扩展名静态资源一律回 `application/octet-stream`，是潜在「无法渲染」响应来源。
 
+## 额外加固（后续迭代）
+
+`dsh-file-handler` client.js 做了两层增强：
+
+1. **更宽泛的 `isNonFilePath` 判断**：用 `[\\/][\\/]` 检测路径分隔符（覆盖 Windows `\`），防止绝对路径被误判为"非文件"。
+2. **多层兜底包装**：除 `workspaces.api?.host` 外，还遍历 `workspaces.api` 自身属性，找到所有含 `openPath`/`openTextFile` 的方法并包装，防止通过不同实例引用绕过拦截。用 `__fhPatched` 标记避免重复包装。
+
 ## 相关代码状态
 
 - `dsh-file-handler` 已保留：无扩展名非已知文件不调系统 open（转给壳）、`api.host.openPath/openTextFile` 兜底包装、`[fh]` 诊断日志。

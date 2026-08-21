@@ -107,6 +107,33 @@ window.__ModuleLoader__.load({
           };
         }
       }
+
+      // 额外兜底：直接包装 WorkspaceRuntime 内部的 this.api.host.openPath
+      // （防止 workspaces.api?.host 指向不同实例时漏掉拦截）。
+      // 通过遍历 workspaces 的所有属性找到包含 openPath 的 host-like 对象。
+      if (workspaces && typeof workspaces.api === "object" && workspaces.api !== null) {
+        const apiObj = workspaces.api;
+        // 有些版本 api.host 可能是延迟初始化的，这里做一层通用检测
+        const candidates = [apiObj.host, apiObj];
+        for (const candidate of candidates) {
+          if (!candidate) continue;
+          for (const method of ["openPath", "openTextFile"]) {
+            const origMethod = candidate[method];
+            if (typeof origMethod !== "function") continue;
+            // 避免重复包装（同一函数引用说明已经包装过）
+            if (origMethod.__fhPatched) continue;
+            candidate[method] = function __fhOpenPathWrapper(payload, signal) {
+              const path = typeof payload === "string" ? payload : payload?.path;
+              if (isNonFilePath(path)) {
+                console.log(`[fh] 兜底拦截 api.${method} 非文件路径:`, JSON.stringify(path));
+                return Promise.resolve({ result: { ok: true, value: { opened: true } } });
+              }
+              return origMethod.call(this, payload, signal);
+            };
+            candidate[method].__fhPatched = true;
+          }
+        }
+      }
     }
 
     // ── 浏览器侧兜底：webview 可能把非 http(s) 的 window.open / 自定义 scheme 链接
