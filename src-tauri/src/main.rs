@@ -23,6 +23,85 @@ fn main() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // 主窗口改为 setup 中手动构建：这样才有机会挂 on_navigation / on_download
+            // 两层原生拦截，堵住 macOS WKWebView 把「无法渲染的内容 / 导航 / 下载」
+            // 交给 LaunchServices 弹系统 "Choose Application" 对话框的通道。
+            // 窗口参数与原先 tauri.conf.json 配置完全一致（Windows 无边框、macOS 透明 Overlay）。
+            {
+                use tauri::{WebviewUrl, WebviewWindowBuilder};
+                #[cfg(target_os = "macos")]
+                use tauri::TitleBarStyle;
+
+                let mut builder = WebviewWindowBuilder::new(
+                    app,
+                    "main",
+                    WebviewUrl::App("index.html".into()),
+                )
+                .title("iyam-dsh")
+                .inner_size(1280.0, 800.0)
+                .resizable(true);
+
+                #[cfg(target_os = "macos")]
+                {
+                    builder = builder
+                        .decorations(true)
+                        .transparent(true)
+                        .title_bar_style(TitleBarStyle::Overlay)
+                        .hidden_title(true);
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    builder = builder.decorations(false);
+                }
+
+                builder
+                    .on_navigation(|url| {
+                        let scheme = url.scheme();
+                        match scheme {
+                            // 生产环境壳页面 tauri://localhost；Tauri IPC 通道
+                            "tauri" | "ipc" => true,
+                            // 开发环境壳页面 localhost:1420；DSH 服务 127.0.0.1
+                            "http" | "https" => {
+                                let host = url.host_str().unwrap_or("");
+                                host == "localhost"
+                                    || host == "127.0.0.1"
+                                    || host == "::1"
+                                    || host == "tauri.localhost"
+                            }
+                            "about" => url.path() == "blank",
+                            // file://、自定义 scheme、外部站点一律拦截，
+                            // 避免 WebKit 把内容交给 LaunchServices 弹系统对话框。
+                            _ => false,
+                        }
+                    })
+                    .on_download(|_webview, event| {
+                        use tauri::webview::DownloadEvent;
+                        match event {
+                            DownloadEvent::Requested { url, destination } => {
+                                // 有下载 handler 后，wry 对「无法渲染的 MIME 响应」会改走下载
+                                // 而非 Allow → 不再弹 "Choose Application"。保存到系统下载目录。
+                                log::info!(
+                                    "[webview-download] {} → {}",
+                                    url,
+                                    destination.display()
+                                );
+                            }
+                            DownloadEvent::Finished { url, path, success } => {
+                                log::info!(
+                                    "[webview-download] finished {} success={} path={:?}",
+                                    url,
+                                    success,
+                                    path
+                                );
+                            }
+                            // DownloadEvent 标记为非穷尽枚举，保留通配分支
+                            _ => {}
+                        }
+                        true
+                    })
+                    .build()?;
+            }
+
             // macOS：替换默认菜单栏（默认菜单含 Reload/DevTools/缩放/帮助等无用项），
             // 只保留应用/编辑/窗口三个子菜单。Windows/Linux 无系统菜单栏，不设置。
             #[cfg(target_os = "macos")]

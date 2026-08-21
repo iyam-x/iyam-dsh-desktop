@@ -32,6 +32,9 @@ const DOCK_MAX = 760;
 const DOCK_DEFAULT = 460;
 const DOCK_STORAGE_KEY = "iyam-dsh-dock-width";
 
+// 手动启动 DSH 的终端命令：Windows 下安装的包装脚本是 dsh.cmd，其余平台是 dsh。
+const DSH_CLI = /Windows/i.test(navigator.userAgent) ? "dsh.cmd" : "dsh";
+
 function loadDockWidth(): number {
   try {
     const raw = localStorage.getItem(DOCK_STORAGE_KEY);
@@ -265,7 +268,7 @@ export default function App() {
             <button onClick={() => window.location.reload()}>重试</button>
             <p className="error-hint">
               也可手动在终端运行：
-              <code>~/.iyam-dsh/bin/dsh web</code>
+              <code>{`~/.iyam-dsh/bin/${DSH_CLI} web`}</code>
             </p>
           </div>
         </div>
@@ -288,7 +291,7 @@ export default function App() {
             <button onClick={() => invoke("restart_dsh")}>重启 DSH</button>
             <p className="error-hint">
               也可手动在终端运行：
-              <code>~/.iyam-dsh/bin/dsh web</code>
+              <code>{`~/.iyam-dsh/bin/${DSH_CLI} web`}</code>
             </p>
           </div>
         </div>

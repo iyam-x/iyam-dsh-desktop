@@ -1,7 +1,7 @@
 # 首次问答后弹出 macOS "Choose Application" 对话框
 
 - 日期：2026-08-21
-- 状态：**未解决 / 待继续排查**
+- 状态：**已修复（待 mac 真机验证）**
 - 环境：macOS（aarch64）
 
 ## 症状
@@ -26,18 +26,44 @@ DSH **首次**发起带**代码块**的问答、回答完成时，macOS 弹出�
 | webview 导航 | 主窗口改 Rust builder + `on_navigation` 拦截非 http(s) scheme | **未拦下** → 非 webview 转发（已回退该改造） |
 | default-browser | `bundle-name`/`default-browser-id` osascript | LSHandlers 无 `use_default` → 排除 |
 
-## 当前结论
+## 当前结论（已推翻旧推测）
 
-触发源是 DSH 内部某个**直接调用 `NSWorkspace`/LaunchServices 的原生模块**（node 侧 koffi 之类），绕过了浏览器端、host RPC、open CLI、webview 导航等所有可拦截层。`use_default` 是运行时构造的值，DSH 源码/数据中均无此字符串。
+旧记录推测「DSH 内部某原生模块直接调 NSWorkspace/LaunchServices」——**不成立**：bundle 内无 NSWorkspace 代码，koffi 仅用于 Windows COM（目录选择器/ACL），mac 目录选择器走 `osascript choose folder`。
 
-## 下一步（待执行）
+**实际根因是 wry 0.55.1 的两处行为 + WKWebView 兜底**：
 
-1. 用 `sudo fs_usage -w -f exec | grep -iE 'use_default|open|osascript|launch'` 在复现期间捕获，定位实际执行的命令/进程。
-2. 或检查 `dsh-host-directory-picker-native` 等含原生代码（koffi）的包在首次会话时是否直接打开文件。
-3. 定位后决定：修复 DSH 行为 / 配置默认处理应用 / 接受为 DSH 自身 bug 并绕开。
+1. **响应级漏洞**：`wry/src/wkwebview/navigation.rs` 的 `decidePolicyForNavigationResponse` 在响应 MIME 无法被 WebKit 渲染（如 `application/octet-stream`）且**未设置下载 handler 时，直接 `Allow`**。WKWebView 收到无法渲染的响应后会交给 LaunchServices → 弹 "Choose Application"。`use_default` 是 WebKit 侧兜底名，DSH 源码里不存在。
+2. **导航动作全放行**：未设置 `on_navigation` 时 wry 对任意 URL 导航一律 `Allow`。
+3. **window.open 兜底**：未设置 new-window handler 时 `createWebViewWith` 返回 nil，WebKit 把 URL 交给 `NSWorkspace`。
+
+三者都**不产生 JS 日志、不调 `open` CLI、不经过 `on_navigation`**，与「零日志 / 无 open 进程 / on_navigation 未拦下」的观测完全吻合。
+
+## 修复（已实施）
+
+主窗口从 `tauri.conf.json` 配置式改为 `src-tauri/src/main.rs` setup 手动构建，挂两层原生拦截：
+
+1. **`on_download`**（主修复）：设置下载 handler 后，wry 对「无法渲染的 MIME 响应」改走 `.download` 交给下载流程保存到系统下载目录，**不再弹系统对话框**。
+2. **`on_navigation`**（防御）：只放行壳页面来源（dev `localhost:1420` / prod `tauri://`）+ DSH 回环 `127.0.0.1` + IPC + `about:blank`，其余（`file://`、自定义 scheme、外部站点）一律 Cancel。
+
+窗口参数与旧配置一致（Windows 无边框、macOS 透明 Overlay 标题栏）。
+
+## 验证
+
+- Windows：`tauri build --debug --no-bundle` 编译通过，冒烟启动窗口正常创建。
+- macOS：**待真机验证**——首次带代码块问答后不应再弹对话框；日志 `[webview-download]` 可确认被改走下载的内容。
+- 注意：tauri CLI 会按平台自动增删 Cargo.toml 的 `macos-private-api` feature（Windows 构建时移除、macOS 构建时加回），属 CLI 既有行为。
+- 顺带修复：DSH 启动失败——`process.rs` 此前传了 DSH 0.1.0-rc.7 不支持的 `--no-open`（commander 报 `unknown option '--no-open'`），已改为「bundle 为最新（≥rc.8）时始终传 `--no-open`」（rc.8 起该选项受支持且默认会开浏览器）；并让前端错误提示按平台显示 `dsh` / `dsh.cmd`。
+- DSH 升级到 rc.8 后重新打包的附加修复：
+  - `scripts/fetch-dsh.mjs`：Windows 上 `execFileSync("npm")` 无法执行 `npm.cmd`（加 `shell: true`）；新增 `flattenNodeModules` 压平 `--install-strategy nested` 产生的超深 node_modules（makensis 读不了 >260 字符路径，rc.8 曾达 476），同版本冗余副本删除/软链解引用。
+  - `src-tauri/build.rs`：`copy_dir_all` 改为跟随软链复制 + 真实路径循环保护（bundle 内 `node_modules/@deepseek-ai/dsh` 自引用软链与 profiles 软链此前导致 `fs::copy` 报拒绝访问）。
+
+## 排查过程要点
+
+- `use_default` 在 DSH 全部源码/前端 dist/依赖中不存在（仅 dsh-file-handler 注释里提到）。
+- 三个自定义插件（file-handler/shell/rtui-ui）只做拦截/布局/通知/主题，无原生打开调用，**不是触发源**。
+- `dsh-host-frontend-static` 对未知扩展名静态资源一律回 `application/octet-stream`，是潜在「无法渲染」响应来源。
 
 ## 相关代码状态
 
-- `dsh-file-handler` 已保留：无扩展名非已知文件不调系统 open（转给壳）、`api.host.openPath/openTextFile` 兜底包装、`[fh]` 诊断日志（供继续排查）。
-- `process.rs` 已保留：DSH host stderr 落盘到 `~/.iyam-dsh/dsh-stderr.log`（供排查）。
-- 主窗口 `on_navigation` 改造**已回退**（未生效且增加窗口创建风险）。
+- `dsh-file-handler` 已保留：无扩展名非已知文件不调系统 open（转给壳）、`api.host.openPath/openTextFile` 兜底包装、`[fh]` 诊断日志。
+- `process.rs` 已保留：DSH host stderr 落盘到 `~/.iyam-dsh/dsh-stderr.log`。

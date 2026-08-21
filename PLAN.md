@@ -435,4 +435,19 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 - **根因**：`start_dsh` 在「DSH 已运行（pid 文件 + 进程存活）」时提前 `return`，**跳过了其后的插件刷新**；且旧构建残留的 DSH 进程从未加载过新插件集——即使文件拷进去，也要重启 DSH 才生效。
 - **规则**：**内置插件的安装/刷新必须在 `start_dsh` 的「已运行早退」之前执行**，不要放在 spawn 之前那段（早退永远走不到）。
 - **修复**：`process.rs` 把 shell/rtui-ui/file-handler 三个刷新移到 pid 检查前；以「`@iyam/dsh-file-handler/client.js` 是否存在」作为"运行中的 DSH 早于当前构建"的升级标记，缺失则杀掉旧进程走全新 spawn，让新 DSH 加载最新插件。
-- **经验**：凡是"升级后行为没变"类问题，先确认运行中的进程是否真的加载了新资源。DSH 是长驻服务，插件/资源变更必须重启才生效；客户端插件做 `window.__ModuleLoader__.load` 包装时，`ctx.<service>` 在 apply 阶段即已可用（runner 会按 inject 声明做激活门控，等依赖服务就绪再 apply）。
+   - **经验**：凡是"升级后行为没变"类问题，先确认运行中的进程是否真的加载了新资源。DSH 是长驻服务，插件/资源变更必须重启才生效；客户端插件做 `window.__ModuleLoader__.load` 包装时，`ctx.<service>` 在 apply 阶段即已可用（runner 会按 inject 声明做激活门控，等依赖服务就绪再 apply）。
+
+### 11. 文件处理器把"选择工作目录"当非文件路径吞掉，反复弹工作区（2026-08-21）
+
+- **症状**：点击会话框触发"选择工作目录"，且即使已选过也每次都弹；同时"添加自定义模型成功但界面不刷新"疑似同源。
+- **根因**：`dsh-file-handler` 的 `isNonFilePath` 把"无扩展名"一律当 DSH 内部标识符（如 `use_default`）吞掉；但 DSH 的"选择工作目录/工作区"传的是**目录绝对路径（无扩展名）**，被误判为非文件路径 → `openPath` 被吞、DSH 收不到真实选择 → 反复重弹。
+- **修复**：`isNonFilePath` 改为"含路径分隔符 `/ \` 即视为真实文件/目录路径，放行"。仅裸 token（无分隔符、无扩展名、非已知无扩展名文件）才拦截（保 `use_default` 兜底）。
+- **连带**：同文件里 `blockScheme` 也把相对地址（如 `/settings`）判为非 http 而拦截，可能误伤 SPA 内部路由（如保存模型后返回列表不刷新）。改为"仅拦截带 scheme 且非白名单的地址，无 scheme 的相对地址放行"。
+
+### 12. 目录选择器 owner 补丁因 koffi 作用域外而失效，任务栏多图标（2026-08-21）
+
+- **症状**：选文件/选工作区时任务栏多出一个 node 图标。
+- **根因**：打包内置的 DSH 升级后 `worker.cjs` 重写，`show` 仍在 `createFolderDialog()` 内、但 `koffi` 只在该函数外的 `loadWin32DialogBindings` 局部作用域。旧 `ensure_picker_owner_patch` 的 `TO` 注入 `koffi.load('user32.dll')` → 引用即抛 `ReferenceError` → catch 把 owner 置 `null` → 对话框无 owner → 单独占任务栏按钮。旧版 worker 里 koffi 在作用域内故正常，升级后直接坏。
+- **修复**：`TO` 去掉 koffi 依赖，仅做数值范围校验后把 `process.env.DSH_DIALOG_OWNER_HWND` 直接作为 owner 传给 `Show`（HWND 是有效窗口句柄即可，成为主窗口 owned window → 不占任务栏）。并新增 `OLD_KOFFI` 还原分支，使已部署的破损补丁也能被纠正。
+- **经验**：给 DSH 第三方 `worker.cjs` 打补丁时，注入的代码必须不依赖该 worker 自身未 import 的模块（koffi 等）——只依赖全局 `process` / 传入的 `method`/`dialog` 等。
+

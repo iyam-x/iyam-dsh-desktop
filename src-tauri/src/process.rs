@@ -1,6 +1,8 @@
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -14,6 +16,57 @@ use tauri::Manager;
 
 use crate::installer::{bundled_node, dsh_home, get_install_status, refresh_dsh_core, InstallStatus};
 use crate::process_state::DSH_CHILD;
+
+/// 探测当前 bundle 的 DSH 是否支持 `--no-open`。
+///
+/// 背景：rc.7 及更早版本 `web` 命令不认识 `--no-open`，commander 会立即报
+/// "unknown option '--no-open'" 并退出，导致 DSH 后端起不来、界面操作全废。
+/// 但"哪个版本开始支持"不可靠（曾误以为 rc.8 就支持，实际并非如此），故不靠
+/// 版本号硬猜，而是**实际拉起一次**观察：若进程因 unknown option 立即退出 → 不支持；
+/// 若 3s 内仍在运行（说明参数被接受、server 已起）→ 支持。探测进程会被杀掉，不影响正式启动。
+fn dsh_supports_no_open(node: &PathBuf, bin_js: &PathBuf, home: &PathBuf) -> bool {
+    let mut cmd = Command::new(node);
+    cmd.env("DSH_HOME", home.to_string_lossy().to_string())
+        .arg(bin_js)
+        .arg("web")
+        .arg("--no-open")
+        .arg("--port")
+        .arg("0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                // 进程已退出：读取 stderr 判断是否因 unknown option 退出
+                if let Some(mut s) = child.stderr.take() {
+                    let mut content = String::new();
+                    let _ = s.read_to_string(&mut content);
+                    if content.contains("unknown option") && content.contains("no-open") {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            Ok(None) => {
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    return true; // 3s 仍在运行 → 参数被接受
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return false,
+        }
+    }
+}
 
 /// Start the DSH web server process and return the port.
 /// 直接 spawn bundle 内的 node 运行 lib/bin.js，不依赖系统 node / 系统 dsh。
@@ -91,11 +144,18 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     // 为目录选择器 worker 打 owner 补丁（幂等），使对话框归入主窗口任务栏按钮
     crate::installer::ensure_picker_owner_patch(&home);
 
+    // 运行时探测 DSH 是否支持 `--no-open`（旧版本不支持会直接退出、后端起不来）。
+    // 支持才传，避免弹系统浏览器；不支持则不传，保证 DSH 一定能启动。
+    let no_open = dsh_supports_no_open(&node, &bin_js, &home);
+    log::info!("DSH --no-open supported: {}", no_open);
+
     let mut cmd = Command::new(&node);
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
-       // --no-open：DSH 的 web 命令默认会在默认浏览器里打开 web UI；本应用自带 webview，
-       // 不需要浏览器，显式关闭（否则每次启动都会弹一个浏览器标签页）。
-       .arg(&bin_js).arg("web").arg("--no-open").arg("--port").arg("0")
+       .arg(&bin_js).arg("web");
+    if no_open {
+        cmd.arg("--no-open");
+    }
+    cmd.arg("--port").arg("0")
        .stdout(Stdio::piped())
        .stderr(Stdio::piped())
        .stdin(Stdio::null());

@@ -53,7 +53,12 @@ window.__ModuleLoader__.load({
       // "是否像真文件"：无扩展名 且 不是已知无扩展名文件(dockerfile/makefile/...) → 非文件路径。
       // 这类路径(如 DSH 内部标识符/临时名 "use_default")走系统 open 会触发"选择应用"对话框。
       const isNonFilePath = (path) => {
-        const base = (path ? String(path).split(/[\\/]/).pop() : "").toLowerCase();
+        const s = path ? String(path) : "";
+        // 含路径分隔符 → 真实文件/目录路径，必须放行给系统/DSH 打开。
+        // 否则"选择工作目录/工作区"传入的目录绝对路径（无扩展名）会被误判为负样本，
+        // 被吞掉后 DSH 收不到真实选择、反复弹"选择工作区"。
+        if (/[\\/]/.test(s)) return false;
+        const base = s.toLowerCase();
         return !!base && !base.includes(".") && !isNoExtKnown(base);
       };
       const postToShell = (path, name) => {
@@ -110,8 +115,9 @@ window.__ModuleLoader__.load({
     const origWindowOpen = window.open.bind(window);
     window.open = function (url, ...rest) {
       const u = String(url ?? "");
-      if (u && !ALLOWED_URL.test(u)) {
-        console.log("[fh] window.open 非 http(s) 地址 → 拦截:", u);
+      // 仅拦截带 scheme 且非白名单的地址（自定义 scheme）；相对地址放行，避免误伤 SPA 路由
+      if (u && !ALLOWED_URL.test(u) && /^[a-z][a-z0-9+.-]*:/i.test(u)) {
+        console.log("[fh] window.open 非 http(s) scheme 地址 → 拦截:", u);
         return null;
       }
       return origWindowOpen(url, ...rest);
@@ -130,11 +136,15 @@ window.__ModuleLoader__.load({
       true
     );
     // 拦截 location 导航（location.href= / assign / replace）到自定义 scheme。
+    // 仅拦截"带 scheme 且非白名单"的地址（如 dsh://、app://、file://），避免 WebView2
+    // 把自定义 scheme 交给系统弹"选择应用"对话框。无 scheme 的相对地址（/path、./path）
+    // 是 SPA 内部路由，必须放行，否则"添加模型后返回列表"等相对跳转被误拦 → 界面不刷新。
     const blockScheme = (url) => {
       const u = String(url || "");
       if (!u) return false;
       if (ALLOWED_URL.test(u)) return false;
-      console.log("[fh] 导航到非 http(s) → 拦截:", u);
+      if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) return false; // 无 scheme → 内部路由，放行
+      console.log("[fh] 导航到非 http(s) scheme → 拦截:", u);
       return true;
     };
     const loc = window.Location?.prototype;

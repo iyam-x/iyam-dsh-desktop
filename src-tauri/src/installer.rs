@@ -577,15 +577,19 @@ pub(crate) fn ensure_picker_owner_patch(home: &PathBuf) {
         Ok(c) => c,
         Err(_) => return, // 包缺失/路径变化:交给引擎自身报错
     };
-    // 若已是防御式补丁则跳过;否则(原始代码或旧的非防御补丁)重新打。
-    if content.contains("const _h = process.env.DSH_DIALOG_OWNER_HWND") {
+    // 已是正确补丁（无 koffi 依赖、仅数值范围校验）则跳过
+    if content.contains("const _h = process.env.DSH_DIALOG_OWNER_HWND; let _o = null; if (_h && /^[0-9]+$/.test(_h)) { const _n = Number(_h); if (_n > 0 && _n <= 0x7fffffff) { _o = _n; } }") {
         return;
     }
     const FROM: &str = "show: () => method(dialog, SLOT_SHOW, protoShow)(null),";
-    const TO: &str = "show: () => { const _h = process.env.DSH_DIALOG_OWNER_HWND; let _o = null; if (_h && /^[0-9]+$/.test(_h)) { const _n = Number(_h); if (_n > 0 && _n <= 0x7fffffff) { try { const _u = koffi.load('user32.dll'); const _isw = _u.func('__stdcall', 'IsWindow', 'int32', ['void *']); if (_isw(_n)) _o = _n; } catch (_e) { _o = null; } } } return method(dialog, SLOT_SHOW, protoShow)(_o); },";
-    // 旧的非防御式补丁还原为原始形态，再统一打防御式补丁
+    const TO: &str = "show: () => { const _h = process.env.DSH_DIALOG_OWNER_HWND; let _o = null; if (_h && /^[0-9]+$/.test(_h)) { const _n = Number(_h); if (_n > 0 && _n <= 0x7fffffff) { _o = _n; } } return method(dialog, SLOT_SHOW, protoShow)(_o); },";
+    // 旧的非防御式补丁还原为原始形态
     const OLD_TO: &str = "show: () => method(dialog, SLOT_SHOW, protoShow)(process.env.DSH_DIALOG_OWNER_HWND ? Number(process.env.DSH_DIALOG_OWNER_HWND) : null),";
-    let base = content.replace(OLD_TO, FROM);
+    // 含 koffi 的破损补丁：koffi 在 createFolderDialog 作用域外，引用即抛错 → owner 恒为
+    // null → 对话框无 owner → 任务栏单独占按钮。还原为原始形态后统一打正确补丁。
+    const OLD_KOFFI: &str = "show: () => { const _h = process.env.DSH_DIALOG_OWNER_HWND; let _o = null; if (_h && /^[0-9]+$/.test(_h)) { const _n = Number(_h); if (_n > 0 && _n <= 0x7fffffff) { try { const _u = koffi.load('user32.dll'); const _isw = _u.func('__stdcall', 'IsWindow', 'int32', ['void *']); if (_isw(_n)) _o = _n; } catch (_e) { _o = null; } } } return method(dialog, SLOT_SHOW, protoShow)(_o); },";
+    // 还原任何旧补丁（含破损的 koffi 版）为原始形态，再统一打正确补丁
+    let base = content.replace(OLD_TO, FROM).replace(OLD_KOFFI, FROM);
     if base.contains(FROM) {
         let patched = base.replace(FROM, TO);
         if let Err(e) = fs::write(&worker, patched) {

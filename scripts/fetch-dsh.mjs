@@ -15,7 +15,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, cpSync, existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, readlinkSync, symlinkSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, cpSync, existsSync, lstatSync, readFileSync, writeFileSync, mkdirSync, readdirSync, readlinkSync, realpathSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import { dirname, join, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -72,8 +72,11 @@ function currentVersion() {
 }
 
 function latestVersion() {
+  // shell: true —— Windows 上 npm 是 npm.cmd 批处理，execFileSync 无法直接执行
+  // .cmd；经 shell 调用即可跨平台运行（参数均为内部常量或 registry 返回的版本号）。
   const out = execFileSync("npm", ["view", PKG_NAME, "versions", "--json"], {
     encoding: "utf8",
+    shell: true,
   });
   const arr = JSON.parse(out);
   if (!Array.isArray(arr) || arr.length === 0) {
@@ -165,6 +168,134 @@ function stripSourceMappingUrls(root) {
   return count;
 }
 
+// node_modules 深度压平：makensis（NSIS 3.11）读不了超过 Windows MAX_PATH（260 字符）
+// 的源文件路径，而 `--install-strategy nested` 的依赖树会产生很深的嵌套（rc.8 的
+// pi-ai → @anthropic-ai/sdk → @aws-sdk/... 链曾到 8+ 层，最长路径 476 字符），打包时
+// makensis 直接 "failed opening file"。此函数把嵌套依赖逐层上提/去重（等价于 npm
+// hoisting + dedupe），直到树不再变化。幂等；同版本冗余副本删除、版本冲突保留嵌套，
+// 不改变包解析结果。
+function packageVersion(dir) {
+  try {
+    return JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version;
+  } catch {
+    return null;
+  }
+}
+
+/** 把 src（包或 scope 目录）归并到 destDir：无同名 → 上移；同版本 → 删冗余/解软链；scope → 逐包归并。 */
+function mergeInto(src, destDir) {
+  const name = src.split(/[\\/]/).pop();
+  const dest = join(destDir, name);
+  let destExists = true;
+  let destIsLink = false;
+  try {
+    destIsLink = lstatSync(dest).isSymbolicLink();
+  } catch {
+    destExists = false;
+  }
+  if (!destExists) {
+    mkdirSync(destDir, { recursive: true });
+    renameSync(src, dest);
+    return true;
+  }
+  const sv = packageVersion(src);
+  const dv = packageVersion(dest);
+  if (sv && dv) {
+    if (sv === dv) {
+      if (destIsLink) {
+        // dest 是软链：指向 src 或已失效时，删软链并把 src 放到位；否则 src 冗余可删
+        let pointsToSrc = false;
+        try {
+          pointsToSrc = realpathSync(dest) === realpathSync(src);
+        } catch {
+          pointsToSrc = true; // dest 是断链 → 直接替换
+        }
+        if (pointsToSrc) {
+          rmSync(dest, { force: true }); // 只删软链本身
+          renameSync(src, dest);
+        } else {
+          rmSync(src, { recursive: true, force: true });
+        }
+      } else {
+        rmSync(src, { recursive: true, force: true }); // 顶层同版本，冗余副本可删
+      }
+      return true;
+    }
+    return false; // 版本冲突，保留嵌套
+  }
+  if (!sv && !dv) {
+    // 都是 scope 目录：逐包归并
+    let changed = false;
+    let entries;
+    try {
+      entries = readdirSync(src, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const e of entries) {
+      // 真实目录与软链都要归并（软链多为指向主 node_modules 的同版本冗余副本）
+      if ((e.isDirectory() || e.isSymbolicLink()) && mergeInto(join(src, e.name), dest)) changed = true;
+    }
+    try {
+      if (readdirSync(src).length === 0) rmSync(src, { recursive: true, force: true });
+    } catch {
+      /* 忽略 */
+    }
+    return changed;
+  }
+  return false;
+}
+
+/** 返回 dir 的「上一层 node_modules」：父级本身是 node_modules 目录时直接用父级，否则是父级下的 node_modules。 */
+function parentNodeModules(dir) {
+  const parent = dirname(dir);
+  if (parent.split(/[\\/]/).pop() === "node_modules") return parent;
+  return join(parent, "node_modules");
+}
+
+function flattenNodeModules(root) {
+  let moved = 0;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const stack = [root];
+    while (stack.length) {
+      const dir = stack.pop();
+      let entries;
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (!e.isDirectory()) continue;
+        const p = join(dir, e.name);
+        if (e.name === "node_modules") {
+          // 把 p 下的子包归并到上一层 node_modules
+          const parentNM = parentNodeModules(dir);
+          if (parentNM.startsWith(root) && parentNM !== p) {
+            let children;
+            try {
+              children = readdirSync(p, { withFileTypes: true });
+            } catch {
+              continue;
+            }
+            for (const c of children) {
+              if (mergeInto(join(p, c.name), parentNM)) {
+                moved++;
+                changed = true;
+              }
+            }
+          }
+        }
+        // 无论是否 node_modules 都要继续下探，否则深层嵌套永远扫不到
+        stack.push(p);
+      }
+    }
+  }
+  return moved;
+}
+
 let latest;
 try {
   latest = latestVersion();
@@ -180,6 +311,8 @@ if (cur && cmpVer(cur, latest) >= 0 && process.env.IYAM_FORCE_DSH_UPDATE !== "1"
   log("已是最新，无需更新。");
   const fixed = repairBrokenLinks(DSH_DIR, "/node_modules/@deepseek-ai/dsh/");
   if (fixed > 0) log(`修复了 ${fixed} 条断链（node_modules/.bin 软链）。`);
+  const flattened = flattenNodeModules(DSH_DIR);
+  if (flattened > 0) log(`压平了 ${flattened} 处嵌套 node_modules（规避 makensis 长路径）。`);
   process.exit(0);
 }
 
@@ -203,7 +336,7 @@ try {
       // .node。DSH 是受信任的一方依赖，这里整体放行以保证原生产物完整。
       "--dangerously-allow-all-scripts",
     ],
-    { stdio: "inherit" },
+    { stdio: "inherit", shell: true },
   );
   const src = join(tmp, "node_modules", ...PKG_NAME.split("/")); // @deepseek-ai/dsh
   if (!existsSync(join(src, "node_modules", "@deepseek-ai"))) {
@@ -214,7 +347,8 @@ try {
   cpSync(src, DSH_DIR, { recursive: true });
   const fixed = repairBrokenLinks(DSH_DIR, "/node_modules/@deepseek-ai/dsh/");
   const stripped = stripSourceMappingUrls(DSH_DIR);
-  log(`已更新 DSH 到 ${latest}${fixed > 0 ? `（修复 ${fixed} 条断链）` : ""}${stripped > 0 ? `（剥除 ${stripped} 处 sourceMappingURL）` : ""}。`);
+  const flattened = flattenNodeModules(DSH_DIR);
+  log(`已更新 DSH 到 ${latest}${fixed > 0 ? `（修复 ${fixed} 条断链）` : ""}${stripped > 0 ? `（剥除 ${stripped} 处 sourceMappingURL）` : ""}${flattened > 0 ? `（压平 ${flattened} 处嵌套 node_modules）` : ""}。`);
 } catch (e) {
   log(`更新失败：${e.message}`);
   log(`继续使用当前已捆绑的 DSH${cur ? "（" + cur + "）" : ""}。`);

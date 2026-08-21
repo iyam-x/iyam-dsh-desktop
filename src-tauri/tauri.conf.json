@@ -10,17 +10,6 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "iyam-dsh",
-        "width": 1280,
-        "height": 800,
-        "resizable": true,
-        "fullscreen": false,
-        "decorations": false,
-        "transparent": false
-      }
-    ],
     "security": {
       "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*; frame-src http://127.0.0.1:*; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'"
     }

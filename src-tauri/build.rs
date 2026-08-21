@@ -25,7 +25,7 @@ fn main() {
     if src_dir.exists() {
         println!("cargo:warning=Bundling DSH package into app resources ({})",
             du_size(src_dir));
-        copy_dir_all(src_dir, &dest_path).unwrap_or_else(|e| {
+        copy_dir_all(src_dir, &dest_path, &mut std::collections::HashSet::new()).unwrap_or_else(|e| {
             panic!("Failed to copy dsh-package to app resources: {}", e);
         });
     } else {
@@ -36,7 +36,7 @@ fn main() {
     let shell_src = Path::new("bin/dsh-shell-plugin");
     if shell_src.exists() {
         println!("cargo:warning=Bundling shell plugin into app resources");
-        copy_dir_all(shell_src, &dest_path.parent().unwrap().join("dsh-shell-plugin"))
+        copy_dir_all(shell_src, &dest_path.parent().unwrap().join("dsh-shell-plugin"), &mut std::collections::HashSet::new())
             .unwrap_or_else(|e| panic!("Failed to copy shell plugin to app resources: {}", e));
     } else {
         println!("cargo:warning=WARNING: bin/dsh-shell-plugin not found, shell plugin will not be bundled");
@@ -46,7 +46,7 @@ fn main() {
     let rtui_src = Path::new("bin/dsh-rtui-ui");
     if rtui_src.exists() {
         println!("cargo:warning=Bundling rtui-ui plugin into app resources");
-        copy_dir_all(rtui_src, &dest_path.parent().unwrap().join("dsh-rtui-ui"))
+        copy_dir_all(rtui_src, &dest_path.parent().unwrap().join("dsh-rtui-ui"), &mut std::collections::HashSet::new())
             .unwrap_or_else(|e| panic!("Failed to copy rtui-ui plugin to app resources: {}", e));
     } else {
         println!("cargo:warning=WARNING: bin/dsh-rtui-ui not found, rtui-ui plugin will not be bundled");
@@ -56,7 +56,7 @@ fn main() {
     let fh_src = Path::new("bin/dsh-file-handler");
     if fh_src.exists() {
         println!("cargo:warning=Bundling file-handler plugin into app resources");
-        copy_dir_all(fh_src, &dest_path.parent().unwrap().join("dsh-file-handler"))
+        copy_dir_all(fh_src, &dest_path.parent().unwrap().join("dsh-file-handler"), &mut std::collections::HashSet::new())
             .unwrap_or_else(|e| panic!("Failed to copy file-handler plugin to app resources: {}", e));
     } else {
         println!("cargo:warning=WARNING: bin/dsh-file-handler not found, file-handler plugin will not be bundled");
@@ -68,7 +68,7 @@ fn main() {
     let node_dest = dest_path.parent().unwrap().join("node").join(&node_target);
     if node_dir.join("node").exists() || node_dir.join("node.exe").exists() {
         println!("cargo:warning=Bundling Node runtime ({}) into app resources", node_target);
-        copy_dir_all(&node_dir, &node_dest).unwrap_or_else(|e| {
+        copy_dir_all(&node_dir, &node_dest, &mut std::collections::HashSet::new()).unwrap_or_else(|e| {
             panic!("Failed to copy node runtime to app resources: {}", e);
         });
     } else {
@@ -90,19 +90,56 @@ fn rust_target_to_node(target: String) -> String {
     .to_string()
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
+fn copy_dir_all(
+    src: &Path,
+    dst: &Path,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> std::io::Result<()> {
+    // 循环保护：软链可能指回已复制的目录（如 node_modules/@deepseek-ai/dsh → 包根），
+    // 已复制过的真实目录直接跳过，避免无限递归/重复打包。
+    let canon = src.canonicalize().unwrap_or_else(|_| src.to_path_buf());
+    if !visited.insert(canon) {
+        return Ok(());
+    }
+    fs::create_dir_all(dst).with_context(|| format!("create_dir_all {dst:?}"))?;
+    for entry in fs::read_dir(src).with_context(|| format!("read_dir {src:?}"))? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let name = entry.file_name();
         if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(name))?;
+            copy_dir_all(&entry.path(), &dst.join(&name), visited)
+                .with_context(|| format!("copy_dir_all {} → {}", entry.path().display(), dst.join(&name).display()))?;
+        } else if ty.is_symlink() {
+            // 软链：解析真实目标后按目标类型复制（等价 cp -r 跟随软链）；
+            // 目标失效时跳过，避免 npm 布局的软链卡死打包。
+            let target = match entry.path().canonicalize() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let is_target_dir = fs::metadata(&target).map(|m| m.is_dir()).unwrap_or(false);
+            if is_target_dir {
+                copy_dir_all(&target, &dst.join(&name), visited)
+                    .with_context(|| format!("copy_dir_all(link) {} → {}", target.display(), dst.join(&name).display()))?;
+            } else {
+                fs::copy(&target, &dst.join(&name))
+                    .with_context(|| format!("fs::copy(link) {} → {}", target.display(), dst.join(&name).display()))?;
+            }
         } else {
-            fs::copy(&entry.path(), &dst.join(name))?;
+            fs::copy(&entry.path(), &dst.join(&name))
+                .with_context(|| format!("fs::copy {} → {}", entry.path().display(), dst.join(&name).display()))?;
         }
     }
     Ok(())
+}
+
+/// 给 io::Error 附加路径上下文的辅助 trait。
+trait CtxExt<T> {
+    fn with_context<F: FnOnce() -> String>(self, f: F) -> std::io::Result<T>;
+}
+impl<T> CtxExt<T> for std::io::Result<T> {
+    fn with_context<F: FnOnce() -> String>(self, f: F) -> std::io::Result<T> {
+        self.map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", f())))
+    }
 }
 
 fn du_size(path: &Path) -> String {
