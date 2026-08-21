@@ -2,9 +2,7 @@
 
 DeepSeek Harness（DSH）的跨平台原生桌面客户端。内置完整 **DSH 内核**与 **Node.js 运行时**，**无需联网、无需预先安装 Node.js** 即可开箱即用。
 
-[![Build](https://github.com/OWNER/iyam-dsh-desktop/actions/workflows/build.yml/badge.svg)](https://github.com/OWNER/iyam-dsh-desktop/actions/workflows/build.yml)
-
-> 将上方 `OWNER` 替换为本仓库在 GitHub 的实际所有者（个人名或组织名）。
+![preview.png](assets/preview.png)
 
 ## 功能特性
 
@@ -15,14 +13,14 @@ DeepSeek Harness（DSH）的跨平台原生桌面客户端。内置完整 **DSH 
 
 ## 安装包下载
 
-发布版安装包在 [Releases](https://github.com/OWNER/iyam-dsh-desktop/releases) 页面，按操作系统选择：
+发布版安装包在 [Releases](https://github.com/iyam-x/iyam-dsh-desktop/releases) 页面，按操作系统选择：
 
 | 平台 | 安装包 | 说明 |
 | --- | --- | --- |
-| macOS（Apple Silicon） | `iyam-dsh_<版本>_aarch64.dmg` | 拖入「应用程序」即可 |
-| macOS（Intel） | `iyam-dsh_<版本>_x64.dmg` | 同上 |
-| Windows 10/11（x64） | `iyam-dsh_<版本>_x64-setup.exe` | 双击安装 |
-| Linux（x64） | `iyam-dsh_<版本>_amd64.AppImage` / `iyam-dsh_<版本>_amd64.deb` | AppImage `chmod +x` 后运行；deb 用 `apt install` |
+| macOS（Apple Silicon） | iyam-dsh_<版本>_aarch64.dmg | 拖入「应用程序」即可 |
+| macOS（Intel） | iyam-dsh_<版本>_x64.dmg | 同上 |
+| Windows 10/11（x64） | iyam-dsh_<版本>_x64-setup.exe | 双击安装 |
+| Linux（x64） | iyam-dsh_<版本>_amd64.AppImage / iyam-dsh_<版本>_amd64.deb | AppImage chmod +x 后运行；deb 用 apt install |
 
 ### 系统要求
 
@@ -50,6 +48,7 @@ DeepSeek Harness（DSH）的跨平台原生桌面客户端。内置完整 **DSH 
 - [Rust](https://www.rust-lang.org/) 稳定版工具链
 - [pnpm](https://pnpm.io/) 9
 - 平台原生依赖：
+  
   - **Linux**：`libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev build-essential pkg-config libssl-dev python3`
   - **macOS**：Xcode Command Line Tools（`xcode-select --install`）
   - **Windows**：Visual Studio 2022 含「使用 C++ 的桌面开发」
@@ -117,10 +116,10 @@ iyam-dsh-desktop/
 
 | 功能 | 行为 |
 | --- | --- |
-| `dsh plugin add <pkg>` / `dsh plugin remove <pkg>` | ✅ 完整可用 |
-| Agent Presets | ✅ 读取 `~/.iyam-dsh/.agent-presets/` |
+| dsh plugin add <pkg> / dsh plugin remove <pkg> | ✅ 完整可用 |
+| Agent Presets | ✅ 读取 ~/.iyam-dsh/.agent-presets/ |
 | Cordis 插件系统 | ✅ 完整保留 |
-| DSH 内核升级 | 菜单「检查更新」或 `npm update -g @deepseek-ai/dsh` |
+| DSH 内核升级 | 菜单「检查更新」或 npm update -g @deepseek-ai/dsh |
 
 ## 风险提示
 
