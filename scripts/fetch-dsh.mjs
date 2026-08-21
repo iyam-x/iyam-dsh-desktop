@@ -115,8 +115,22 @@ function repairBrokenLinks(root, marker) {
         const idx = t.indexOf(marker);
         if (idx === -1) continue; // 指向包外且已失效，无法修复，跳过
         const relFromRoot = t.slice(idx + marker.length);
-        const target = join(root, relFromRoot);
-        if (!existsSync(target)) continue;
+        let target = join(root, relFromRoot);
+        if (!existsSync(target)) {
+          // 压平后嵌套包被上提到顶层 node_modules，原相对路径失效；
+          // 取最后一个 node_modules/ 之后的片段，从顶层重新解析。
+          const lastNM = relFromRoot.lastIndexOf("node_modules/");
+          if (lastNM !== -1) {
+            target = join(root, "node_modules", relFromRoot.slice(lastNM + "node_modules/".length));
+          }
+        }
+        if (!existsSync(target)) {
+          // 顶层也解析不到：.bin 软链只是开发期命令垫片，运行期不会被加载，
+          // 直接删除失效软链，避免 tauri bundler 校验资源时报断链错误。
+          unlinkSync(p);
+          fixed++;
+          continue;
+        }
         // 用 unlinkSync 而非 rmSync：断链目标可能是目录，rmSync(force) 会静默失败，
         // 留下旧链导致 symlinkSync 撞 EEXIST。unlinkSync 直接删软链本身。
         unlinkSync(p);
@@ -345,10 +359,9 @@ try {
   log(`复制 ${src} → ${DSH_DIR}`);
   rmSync(DSH_DIR, { recursive: true, force: true });
   cpSync(src, DSH_DIR, { recursive: true });
-  const fixed = repairBrokenLinks(DSH_DIR, "/node_modules/@deepseek-ai/dsh/");
   const stripped = stripSourceMappingUrls(DSH_DIR);
   const flattened = flattenNodeModules(DSH_DIR);
-  log(`已更新 DSH 到 ${latest}${fixed > 0 ? `（修复 ${fixed} 条断链）` : ""}${stripped > 0 ? `（剥除 ${stripped} 处 sourceMappingURL）` : ""}${flattened > 0 ? `（压平 ${flattened} 处嵌套 node_modules）` : ""}。`);
+  log(`已更新 DSH 到 ${latest}${stripped > 0 ? `（剥除 ${stripped} 处 sourceMappingURL）` : ""}${flattened > 0 ? `（压平 ${flattened} 处嵌套 node_modules）` : ""}。`);
 } catch (e) {
   log(`更新失败：${e.message}`);
   log(`继续使用当前已捆绑的 DSH${cur ? "（" + cur + "）" : ""}。`);
@@ -356,3 +369,7 @@ try {
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
+// 临时安装目录已删除，node_modules/.bin 指向它的绝对软链此刻才真正断链，
+// 修复必须放在 tmp 清理之后（更新流程内修复会因 existsSync 命中而全部跳过）。
+const fixed = repairBrokenLinks(DSH_DIR, "/node_modules/@deepseek-ai/dsh/");
+if (fixed > 0) log(`修复了 ${fixed} 条断链（node_modules/.bin 软链）。`);

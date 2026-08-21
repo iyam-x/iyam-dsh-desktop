@@ -11,7 +11,7 @@
 - **插件加载失败**：`dsh-rtui-ui` 的 `client.js` 注册 id 由短名 `"dsh-rtui-ui"` 修正为完整包名 `"@iyam/dsh-rtui-ui"`，修复安装后启动报 `Failed to load plugins`。
 - **托盘「退出」失效**：修复 `DSH_CHILD` 锁与 `child.wait()` 相互等待的死锁（此前表现为应用不退、托盘无响应）；退出路径恢复正常。
 - **退出后 node 残留**：托盘「退出」前先显式清理，并按 `dsh.pid` 递归终止 node 进程树，应用退出时 DSH 一并关闭。
-- **通知点击不唤起窗口**：`tauri-plugin-notification` 丢弃了激活句柄导致点击事件丢失，改用 `notify-rust` 直接接管，点击通知后把主窗口还原/显示/聚焦。
+- **通知点击不唤起窗口**：系统通知点击后窗口无法被唤起。根因为 `notify-rust` 的 `wait_for_response` 对「无按钮的纯点击」不会真正阻塞等待（`needs_response()` 为 false → 底层 `should_wait=false`），点击激活永远收不到。改为 macOS 直接用 `mac_notification_sys` 弹通知并 `wait_for_click(true)`：整条 toast 可点击、`send()` 真正阻塞至用户点击，再经主线程把主窗口还原/显示/聚焦。（`tauri-plugin-notification` 因丢弃激活句柄，未采用。）
 
 ### 变更
 
