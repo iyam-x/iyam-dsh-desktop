@@ -81,15 +81,15 @@ body,
 }
 
 /* ── 窗口控制按钮 hover ──
-   按 Windows 规范（WinUI 3 AppWindowTitleBar 默认值）：
-   - 最小化/最大化：悬停/按下为中性半透明白覆盖层，图标颜色不变（与原生一致）
-   - 关闭：悬停 Windows 红 #e81123，按下更深的 #a50000 */
+    按 Windows 规范（WinUI 3 AppWindowTitleBar 默认值）：
+    - 最小化/最大化：悬停/按下为中性淡灰覆盖层，图标颜色不变（与原生一致）
+    - 关闭：悬停 Windows 红 #e81123，按下更深的 #a50000 */
 .tb-btn:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(229, 231, 235, 0.16);
 }
 
 .tb-btn:active {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(229, 231, 235, 0.26);
 }
 
 .tb-close:hover {

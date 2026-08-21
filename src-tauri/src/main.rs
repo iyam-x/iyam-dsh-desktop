@@ -231,9 +231,6 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), String> {
     // 会导致 id 被自动编号，on_menu_event 里按字符串 id match 永远命中不了）。
     let open_item = MenuItem::with_id(app, "open_dsh", "打开 DSH", true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let restart_item =
-        MenuItem::with_id(app, "restart_dsh", "重启 DSH", true, None::<&str>)
-            .map_err(|e| e.to_string())?;
     let separator = PredefinedMenuItem::separator(app)
         .map_err(|e| e.to_string())?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)
@@ -241,7 +238,7 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), String> {
 
     let menu = Menu::with_items(
         app,
-        &[&open_item, &restart_item, &separator, &quit_item],
+        &[&open_item, &separator, &quit_item],
     )
     .map_err(|e| e.to_string())?;
 
@@ -267,12 +264,6 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), String> {
                         let _ = win.show();
                         let _ = win.set_focus();
                     }
-                }
-                "restart_dsh" => {
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = tray_commands::restart_dsh(app).await;
-                    });
                 }
                 "quit" => {
                     // 必须在主线程调用 app.exit() 才能可靠终止事件循环。
