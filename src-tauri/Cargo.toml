@@ -18,9 +18,6 @@ tauri-plugin-notification = "2"
 # 直接弹 toast 并接管点击激活回调（tauri-plugin-notification 丢弃了激活句柄，
 # 点击通知无法把窗口带到前台）。与插件同版本，无新增编译。
 notify-rust = "4"
-# macOS 点击激活：notify-rust 的 wait_for_response 对"无按钮纯点击"不真正阻塞等待，
-# 故 macOS 直接用它（wait_for_click）弹通知。与 notify-rust 依赖的 0.6 同版本，自动合一。
-mac-notification-sys = "0.6"
 # 文件内联预览：二进制读取转 base64 data URL
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
@@ -45,3 +42,10 @@ windows-sys = { version = "0.52", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# macOS-only: 点击激活。notify-rust 的 wait_for_response 对"无按钮纯点击"不真正
+# 阻塞等待，故 macOS 直接用它（wait_for_click）弹通知。必须按 target 门控——它依赖
+# objc2，而 objc2 在非 Apple 平台触发 compile_error!，会导致 Windows/Linux 构建失败。
+# 与 notify-rust 依赖的 0.6 同版本，自动合一。
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "0.6"
