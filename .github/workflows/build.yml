@@ -16,11 +16,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS：aarch64 用 arm64 运行器，x64 用 intel 运行器（各自原生构建，不做交叉编译）
+          # macOS：仅出 Apple Silicon (aarch64)。GitHub 已下架 macos-13（最后的 Intel
+          # 运行器），且无托管的 x64 macOS 运行器；本项目内置的 Node/DSH 运行时按架构
+          # 打包，交叉编译 x64 需自托管 Intel 机器或完整 x64 交叉打包，故暂不出 x64。
           - platform: macos-14
             args: "--target aarch64-apple-darwin"
-          - platform: macos-13
-            args: "--target x86_64-apple-darwin"
           - platform: windows-latest
             args: ""
           - platform: ubuntu-22.04
