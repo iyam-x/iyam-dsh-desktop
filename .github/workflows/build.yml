@@ -19,11 +19,10 @@ jobs:
           # macOS：仅出 Apple Silicon (aarch64)。GitHub 已下架 macos-13（最后的 Intel
           # 运行器），且无托管的 x64 macOS 运行器；本项目内置的 Node/DSH 运行时按架构
           # 打包，交叉编译 x64 需自托管 Intel 机器或完整 x64 交叉打包，故暂不出 x64。
+          # Linux 不出 CI 安装包，用户自行从源码构建。
           - platform: macos-14
             args: "--target aarch64-apple-darwin"
           - platform: windows-latest
-            args: ""
-          - platform: ubuntu-22.04
             args: ""
 
     runs-on: ${{ matrix.platform }}
@@ -49,18 +48,6 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      - name: Install Linux build dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          # AppImage 打包需要 libfuse2（linuxdeploy 及其 appimage 插件本身都是
-          # AppImage，Ubuntu 22.04 默认只有 fuse3，不含 libfuse2；缺失会报
-          # "failed to run linuxdeploy"）与 squashfs-tools（提供 mksquashfs）。
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-            patchelf libgtk-3-dev build-essential pkg-config \
-            libssl-dev python3 libfuse2 squashfs-tools
-
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
@@ -75,13 +62,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # linuxdeploy 在打包时会 strip 被打包的系统库，但 Ubuntu 22.04 的若干库含
-          # .relr.dyn 段（现代 ELF 重定位格式），strip 会报
-          # "unknown type [0x13] section .relr.dyn" 导致 "failed to run linuxdeploy"。
-          # NO_STRIP=true 跳过 strip，规避该问题（Tauri issue #14796）。
-          NO_STRIP: "true"
-          # 容器/无 FUSE 环境下让 AppImage 自解压运行，作为额外保险。
-          APPIMAGE_EXTRACT_AND_RUN: "1"
           # 可选：填入以下 Secret 即可自动签名/公证 macOS 产物。留空则产出未签名包。
           # APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
           # APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
