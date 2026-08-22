@@ -52,11 +52,14 @@ jobs:
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
+          # AppImage 打包需要 libfuse2（linuxdeploy 及其 appimage 插件本身都是
+          # AppImage，Ubuntu 22.04 默认只有 fuse3，不含 libfuse2；缺失会报
+          # "failed to run linuxdeploy"）与 squashfs-tools（提供 mksquashfs）。
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
             patchelf libgtk-3-dev build-essential pkg-config \
-            libssl-dev python3
+            libssl-dev python3 libfuse2 squashfs-tools
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
