@@ -69,6 +69,6 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "iyam-dsh-desktop ${{ github.ref_name }}"
           releaseBody: "自动构建的安装包，见下方 Assets。"
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
