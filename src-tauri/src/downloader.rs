@@ -616,7 +616,7 @@ fn run_npm_install(
             let mut new_path = node_dir_s.to_string();
             if let Ok(existing) = std::env::var("PATH") {
                 if !existing.is_empty() {
-                    new_path.push_str(":");
+                    new_path.push_str(crate::installer::path_separator());
                     new_path.push_str(&existing);
                 }
             }

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
@@ -31,6 +31,8 @@ type UpdateInfo = {
   managed: boolean;
 };
 
+type Toast = { text: string; kind: "info" | "ok" | "err" } | null;
+
 // 阻止冒泡，避免触发标题栏拖拽
 function stopDragPropagation(e: ReactMouseEvent) {
   e.stopPropagation();
@@ -38,51 +40,65 @@ function stopDragPropagation(e: ReactMouseEvent) {
 
 export function TitleBarUpdateButton() {
   const btnRef = useRef<HTMLButtonElement>(null);
+  // 应用内 toast：点「检查更新」的即时反馈（原生菜单/系统通知都可能被忽略或拦截，
+  // toast 画在窗口内保证可见）。
+  const [toast, setToast] = useState<Toast>(null);
+  const toastTimer = useRef<number | null>(null);
 
-  async function handleClick(e: ReactMouseEvent) {
-    e.stopPropagation();
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    };
+  }, []);
+
+  function showToast(text: string, kind: "info" | "ok" | "err" = "info") {
+    setToast({ text, kind });
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+  }
+
+  async function doCheck(): Promise<UpdateInfo | null> {
+    try {
+      return await invoke<UpdateInfo>("check_for_update");
+    } catch (err) {
+      showToast(`检查更新失败：${String(err ?? "未知错误")}`, "err");
+      return null;
+    }
+  }
+
+  // 在按钮下方弹出更新菜单。
+  async function popupMenu(info: UpdateInfo | null, errMsg: string | null): Promise<void> {
     const btn = btnRef.current;
     if (!btn) return;
-
     const rect = btn.getBoundingClientRect();
     const at = new LogicalPosition(rect.left, rect.bottom + 4);
 
-    let info: UpdateInfo | null = null;
-    try {
-      info = await invoke<UpdateInfo>("check_for_update");
-    } catch (err) {
-      // 网络/命令失败：菜单内给出可读提示，不弹窗打扰
-    }
-
     const items: Array<MenuItem | PredefinedMenuItem> = [];
 
-    // 始终提供「检查更新」操作：点击重新向 Rust 查询并提示结果。
+    // 「检查更新」：应用内 toast 反馈（正在检查 → 结果），不再二次弹菜单。
     items.push(
       await MenuItem.new({
         text: "检查更新",
         action: async () => {
-          try {
-            const r = await invoke<UpdateInfo>("check_for_update");
-            await invoke("notify", {
-              title: r.has_update ? "发现新版本" : "已是最新版本",
-              body: r.has_update
-                ? `dsh v${r.installed} → v${r.latest}`
-                : `dsh 当前 v${r.installed}`,
-            });
-          } catch (err) {
-            await invoke("notify", {
-              title: "检查更新失败",
-              body: String(err ?? "未知错误"),
-            });
+          showToast("正在检查更新…", "info");
+          const r = await doCheck();
+          if (r) {
+            showToast(
+              r.has_update
+                ? `发现新版本 v${r.installed} → v${r.latest}`
+                : `已是最新版本 v${r.installed}`,
+              "ok"
+            );
           }
         },
       })
     );
 
-    if (!info) {
+    if (errMsg || !info) {
       items.push(
+        await PredefinedMenuItem.new({ item: "Separator" }),
         await MenuItem.new({
-          text: "检查更新失败",
+          text: `检查更新失败：${errMsg ?? "无返回"}`,
           enabled: false,
         })
       );
@@ -95,7 +111,6 @@ export function TitleBarUpdateButton() {
       );
 
       if (info.has_update) {
-        // 有新版本：无论是否由本应用托管，都给出更新入口。
         if (info.managed) {
           items.push(
             await MenuItem.new({
@@ -117,7 +132,6 @@ export function TitleBarUpdateButton() {
             })
           );
         } else {
-          // 非本应用托管：提示在终端更新（可执行操作，点击复制提示）。
           items.push(
             await MenuItem.new({
               text: "在终端更新：npm i -g @deepseek-ai/dsh",
@@ -139,16 +153,36 @@ export function TitleBarUpdateButton() {
     await menu.popup(at).catch(() => {});
   }
 
+  async function handleClick(e: ReactMouseEvent) {
+    e.stopPropagation();
+    // 点开菜单：先查询（可稍慢），弹出后展示当前/最新状态。
+    let info: UpdateInfo | null = null;
+    let errMsg: string | null = null;
+    try {
+      info = await invoke<UpdateInfo>("check_for_update");
+    } catch (err) {
+      errMsg = String(err ?? "未知错误");
+    }
+    await popupMenu(info, errMsg);
+  }
+
   return (
-    <button
-      ref={btnRef}
-      className="tb-btn tb-update"
-      onClick={handleClick}
-      onMouseDown={stopDragPropagation}
-      aria-label="检查 dsh 更新"
-      title="检查 dsh 更新"
-    >
-      <ChevronDown />
-    </button>
+    <>
+      <button
+        ref={btnRef}
+        className="tb-btn tb-update"
+        onClick={handleClick}
+        onMouseDown={stopDragPropagation}
+        aria-label="检查 dsh 更新"
+        title="检查 dsh 更新"
+      >
+        <ChevronDown />
+      </button>
+      {toast && (
+        <div className={`tb-toast tb-toast--${toast.kind}`} role="status">
+          {toast.text}
+        </div>
+      )}
+    </>
   );
 }

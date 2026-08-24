@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::installer::dsh_home;
+use crate::installer::{dsh_core_dir, dsh_home};
 
 #[derive(Serialize, Clone)]
 pub struct UpdateInfo {
@@ -93,16 +93,19 @@ async fn maybe_auto_stage(app: &tauri::AppHandle, latest: &str) {
 
 async fn get_installed_version() -> Result<String, String> {
     let home = dsh_home();
-    let pkg = home.join("package.json");
+    // 读 dsh 核心包自身的 package.json（npm 全局安装布局：<home>/lib/node_modules/@deepseek-ai/dsh/
+    // 类 Unix；<home>/node_modules/@deepseek-ai/dsh/ Windows）。不要读 home/package.json——
+    // 那个文件不存在，会一直返回 "unknown"。
+    let pkg = dsh_core_dir(&home).join("package.json");
 
     if !pkg.exists() {
         return Ok("unknown".to_string());
     }
 
     let content =
-        fs::read_to_string(&pkg).map_err(|e| format!("读取 package.json 失败: {}", e))?;
+        fs::read_to_string(&pkg).map_err(|e| format!("读取 dsh package.json 失败: {}", e))?;
     let json: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("解析 package.json 失败: {}", e))?;
+        serde_json::from_str(&content).map_err(|e| format!("解析 dsh package.json 失败: {}", e))?;
 
     Ok(json["version"]
         .as_str()

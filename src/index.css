@@ -130,6 +130,42 @@ body,
   margin-left: auto;
 }
 
+/* 标题栏「检查 dsh 更新」的应用内 toast：画在窗口内，保证点按后的即时反馈可见
+   （不依赖原生菜单二次弹出或系统通知——后者可能被忽略/被 macOS 通知权限拦截）。 */
+.tb-toast {
+  position: fixed;
+  top: 44px;
+  right: 16px;
+  z-index: 9999;
+  max-width: 340px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #f1f5f9;
+  background: rgba(30, 41, 59, 0.96);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  animation: tb-toast-in 0.18s ease-out;
+  pointer-events: none;
+}
+.tb-toast--ok {
+  background: rgba(21, 128, 61, 0.95);
+}
+.tb-toast--err {
+  background: rgba(190, 18, 60, 0.95);
+}
+@keyframes tb-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+
 /* Loading / Installing state */
 .install-card {
   text-align: center;

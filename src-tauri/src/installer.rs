@@ -404,10 +404,102 @@ pub(crate) fn dshmarket_installed(home: &PathBuf) -> bool {
             .exists()
 }
 
+/// 确保托管 node 目录里装有 pnpm。dsh 的 `plugin` 命令内部 `spawnSync("pnpm", ...)`
+/// 要求 pnpm 在 PATH 上；而 GUI 启动的 app 没有用户 shell 的 PATH（nvm 等），
+/// 托管 node 又只带 npm/npx，故 pnpm 必须由 app 自己装。
+///
+/// 幂等：托管 node 目录的 `bin/pnpm` 已存在即跳过。用托管 node 的 npm 全局安装到
+/// node 目录自身（`--prefix <node_dir>`），pnpm 落在与 `node` 同目录的 `bin/`，
+/// 配合 `prepend_managed_node_path` 前置 PATH 即可被 dsh 解析到。
+fn ensure_pnpm(home: &PathBuf) -> Result<(), String> {
+    let node_dir = home.join("node").join(node_target());
+    // 全局 bin 位置平台不同：类 Unix 在 `<node_dir>/bin/pnpm`，Windows 在 `<node_dir>/pnpm.cmd`
+    // （npm 在 Windows 把全局 bin shim 放 --prefix 根目录，不在 bin/ 子目录）。
+    let pnpm_bin = if cfg!(windows) {
+        node_dir.join("pnpm.cmd")
+    } else {
+        node_dir.join("bin").join("pnpm")
+    };
+    if pnpm_bin.exists() {
+        return Ok(());
+    }
+    let node = managed_node(home);
+    if !node.exists() {
+        return Err("托管 node 不存在，无法安装 pnpm".into());
+    }
+    // npm-cli.js：Win 在 node_dir/node_modules/npm/bin；类 Unix 在 node_dir/lib/node_modules/npm/bin
+    let npm_cli = if cfg!(windows) {
+        node_dir.join("node_modules").join("npm").join("bin").join("npm-cli.js")
+    } else {
+        node_dir.join("lib").join("node_modules").join("npm").join("bin").join("npm-cli.js")
+    };
+    if !npm_cli.exists() {
+        return Err(format!("npm 未找到: {}", npm_cli.display()));
+    }
+
+    // 与安装 dsh 相同的镜像回退链（npmmirror → 腾讯 → 华为 → npmjs）。
+    let registries: &[&str] = &[
+        "https://registry.npmmirror.com",
+        "https://mirrors.cloud.tencent.com/npm/",
+        "https://repo.huaweicloud.com/repository/npm/",
+        "https://registry.npmjs.org",
+    ];
+    let mut last_err: Option<String> = None;
+    for registry in registries {
+        let mut cmd = Command::new(&node);
+        cmd.arg(&npm_cli)
+            .arg("install")
+            .arg("-g")
+            .arg("pnpm@11")
+            .arg("--prefix")
+            .arg(&node_dir)
+            .arg("--no-audit")
+            .arg("--no-fund")
+            .arg("--registry")
+            .arg(registry)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        // PATH 注入：npm 内部脚本（裸 `node`）需要托管 node 可解析。
+        if let Some(dir) = node.parent() {
+            if let Some(dir_s) = dir.to_str() {
+                let mut new_path = dir_s.to_string();
+                if let Ok(existing) = std::env::var("PATH") {
+                    if !existing.is_empty() {
+                        new_path.push_str(path_separator());
+                        new_path.push_str(&existing);
+                    }
+                }
+                cmd.env("PATH", new_path);
+            }
+        }
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        match cmd.output() {
+            Ok(o) if o.status.success() => return Ok(()),
+            Ok(o) => {
+                last_err = Some(format!(
+                    "{}: {}",
+                    registry,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ));
+            }
+            Err(e) => {
+                last_err = Some(format!("{}: {}", registry, e));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "pnpm 安装失败".into()))
+}
+
 /// 用托管 node 跑 `dsh plugin --profile web add dshmarket`（DSH 内部 spawnSync pnpm）。
 /// 管道化输出、隐藏控制台窗、整体超时（避免无网络时挂死首次启动）。
 fn run_dsh_plugin_add(cli: &PathBuf, home: &PathBuf) -> Result<(), String> {
     const TIMEOUT: u64 = 5 * 60; // 5 分钟整体超时
+    // dsh plugin 命令内部 `spawnSync("pnpm", ...)` 需要 pnpm 在 PATH 上。
+    // GUI 启动的 app 没有用户 shell 的 PATH（nvm 等），先确保托管 pnpm 就位。
+    ensure_pnpm(home)?;
     // cli 为真实 bin.js 路径：跨平台统一用 node 直接跑，托管态用托管 node。
     let managed = cli.starts_with(home);
     let mut cmd = if managed {
@@ -415,6 +507,11 @@ fn run_dsh_plugin_add(cli: &PathBuf, home: &PathBuf) -> Result<(), String> {
     } else {
         Command::new("node")
     };
+    // 托管 node 目录前置到 PATH：dsh 内部 spawn 的 pnpm（node 脚本）才能解析到
+    // `node` 与 `pnpm`（二者都在托管 node 的 bin 目录，见 ensure_pnpm）。
+    if let Some(node_path) = prepend_managed_node_path(home) {
+        cmd.env("PATH", node_path);
+    }
     cmd.arg(cli)
         .arg("plugin")
         .arg("--profile")
@@ -837,6 +934,16 @@ pub(crate) fn managed_node_bin_dir(home: &PathBuf) -> Option<PathBuf> {
     managed_node(home).parent().map(|p| p.to_path_buf())
 }
 
+/// 平台 PATH 分隔符：类 Unix `:`，Windows `;`。拼接 PATH 时必须用它，
+/// 否则 Windows 上 PATH 会被 `:` 拼坏（命令解析全部失败）。
+pub(crate) fn path_separator() -> &'static str {
+    if cfg!(windows) {
+        ";"
+    } else {
+        ":"
+    }
+}
+
 /// 在现有 PATH 前插入托管 node 目录（若托管 node 已就绪），让 dsh/原生脚本里的裸
 /// `node` 可用。返回 None 表示无托管 node，调用方应照常不设置 PATH（沿用父进程环境）。
 pub(crate) fn prepend_managed_node_path(home: &PathBuf) -> Option<String> {
@@ -847,7 +954,7 @@ pub(crate) fn prepend_managed_node_path(home: &PathBuf) -> Option<String> {
     let mut new_path = bin_dir.to_string_lossy().to_string();
     if let Ok(existing) = std::env::var("PATH") {
         if !existing.is_empty() {
-            new_path.push_str(":");
+            new_path.push_str(path_separator());
             new_path.push_str(&existing);
         }
     }
