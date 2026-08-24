@@ -2,6 +2,8 @@
 
 DeepSeek Harness（DSH）的跨平台原生桌面客户端。首次启动时会**自动下载并部署** Node.js 运行时与 DSH 内核到本地 `~/.dsh`，之后开箱即用，**无需用户手动安装 Node.js**。
 
+- **开源地址**：<https://github.com/iyam-x/iyam-dsh-desktop>
+
 ![preview.png](assets/preview.png)
 
 ## 功能特性
@@ -15,13 +17,6 @@ DeepSeek Harness（DSH）的跨平台原生桌面客户端。首次启动时会*
 ## 安装包下载
 
 发布版安装包在 [Releases](https://github.com/iyam-x/iyam-dsh-desktop/releases) 页面，按操作系统选择：
-
-| 平台 | 安装包 | 说明 |
-| --- | --- | --- |
-| macOS（Apple Silicon） | iyam-dsh_<版本>_aarch64.dmg | 拖入「应用程序」即可 |
-| macOS（Intel） | iyam-dsh_<版本>_x64.dmg | 同上 |
-| Windows 10/11（x64） | iyam-dsh_<版本>_x64-setup.exe | 双击安装 |
-| Linux（x64） | iyam-dsh_<版本>_amd64.AppImage / iyam-dsh_<版本>_amd64.deb | AppImage chmod +x 后运行；deb 用 apt install |
 
 ### 系统要求
 
@@ -87,11 +82,12 @@ iyam-dsh-desktop (Tauri v2)
 ```
 
 1. **首次启动下载**：检测 `~/.dsh/` 是否已安装 dsh（及托管 Node）。未安装时：
-   - 经 npmmirror → 腾讯云 → 华为云 → nodejs.org 下载 Node 24 归档并解压到 `~/.dsh/node/`；
-   - 用托管 Node 的 npm 以全局布局（`-g --prefix ~/.dsh`）安装 `@deepseek-ai/dsh`，registry 依次回退 npmmirror → 腾讯云 → 华为云 → npmjs，约 1~2 分钟；
-   - 生成独立启动脚本 `~/.dsh/bin/dsh`（Windows 为 `dsh.cmd`）：直接用托管 Node 运行 `lib/bin.js`，不依赖系统 PATH / shebang；
-   - 把三个内置插件部署到 `~/.dsh/lib/node_modules/@iyam/`，并在 `~/.dsh/profiles/node_modules/@iyam/` 建软链，供 dsh 的 profile 插件树解析（dsh 只为其自身依赖闭包建软链，`@iyam/*` 需由 app 补建）；
-   - 首次运行 `dsh plugin` 时按需用托管 npm 预装 `pnpm` 到托管 Node 目录，并注入 PATH（GUI 启动的应用没有用户 shell 的 PATH，找不到 pnpm）。
+  
+  - 经 npmmirror → 腾讯云 → 华为云 → nodejs.org 下载 Node 24 归档并解压到 `~/.dsh/node/`；
+  - 用托管 Node 的 npm 以全局布局（`-g --prefix ~/.dsh`）安装 `@deepseek-ai/dsh`，registry 依次回退 npmmirror → 腾讯云 → 华为云 → npmjs，约 1~2 分钟；
+  - 生成独立启动脚本 `~/.dsh/bin/dsh`（Windows 为 `dsh.cmd`）：直接用托管 Node 运行 `lib/bin.js`，不依赖系统 PATH / shebang；
+  - 把三个内置插件部署到 `~/.dsh/lib/node_modules/@iyam/`，并在 `~/.dsh/profiles/node_modules/@iyam/` 建软链，供 dsh 的 profile 插件树解析（dsh 只为其自身依赖闭包建软链，`@iyam/*` 需由 app 补建）；
+  - 首次运行 `dsh plugin` 时按需用托管 npm 预装 `pnpm` 到托管 Node 目录，并注入 PATH（GUI 启动的应用没有用户 shell 的 PATH，找不到 pnpm）。
 2. **后续启动**：直接复用 `~/.dsh/` 本地安装，秒级启动，不再下载。
 3. **进程管理**：用托管 node spawn `lib/bin.js web --port 0`，监听 stdout 获取端口，通过 Tauri Event 通知前端。
 4. **UI 渲染**：前端收到端口后用 `<iframe src="http://127.0.0.1:<port>">` 加载 DSH Web UI。
@@ -123,7 +119,7 @@ iyam-dsh-desktop/
 
 | 功能 | 行为 |
 | --- | --- |
-| dsh plugin add <pkg> / dsh plugin remove <pkg> | ✅ 完整可用 |
+| dsh plugin add / dsh plugin remove | ✅ 完整可用 |
 | Agent Presets | ✅ 读取 ~/.dsh/.agent-presets/ |
 | Cordis 插件系统 | ✅ 完整保留 |
 | DSH 内核升级 | 菜单「检查更新」后台备货，下次启动生效（失败自动回滚） |
@@ -137,4 +133,4 @@ iyam-dsh-desktop/
 
 ## 许可证
 
-本项目以 [MIT 许可证](./LICENSE) 开源。
+本项目以 [MIT 许可证](./LICENSE) 开源，代码托管于 [github.com/iyam-x/iyam-dsh-desktop](https://github.com/iyam-x/iyam-dsh-desktop)。
