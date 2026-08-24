@@ -141,3 +141,80 @@
   max-width: 100%;
   word-break: break-all;
 }
+
+/* ── 插件市场安装询问弹窗 ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+.modal-card {
+  width: min(440px, 90vw);
+  padding: 24px;
+  border-radius: 12px;
+  background: var(--dock-layer, #1e1e20);
+  border: 1px solid var(--dock-border, rgba(255, 255, 255, 0.1));
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  color: var(--dock-label, #e9e9ec);
+}
+.modal-card h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.modal-desc {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--dock-label2, #9b9ba1);
+}
+.modal-desc code,
+.modal-error code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  word-break: break-all;
+}
+.modal-error {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: #f87171;
+  word-break: break-all;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.btn-ghost,
+.btn-primary {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.btn-ghost {
+  background: transparent;
+  border-color: var(--dock-border, rgba(255, 255, 255, 0.15));
+  color: var(--dock-label2, #9b9ba1);
+}
+.btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.btn-primary {
+  background: var(--dock-accent, #4d6bfe);
+  color: #fff;
+  border-color: var(--dock-accent, #4d6bfe);
+}
+.btn-primary:disabled,
+.btn-ghost:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

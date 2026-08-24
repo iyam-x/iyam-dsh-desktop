@@ -138,6 +138,7 @@ fn main() {
             file_preview::read_text_file,
             file_preview::read_file_data,
             file_preview::write_text_file,
+            installer::install_dshmarket,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -17,10 +17,12 @@
 - **启动闪 cmd 窗口**：`detect_dsh_cli` 的 `where` 探测与 npm 安装子进程补 `CREATE_NO_WINDOW`，消除初始化时多个控制台窗口闪烁。
 - **退出闪「加载失败」**：应用退出时先隐藏主窗口 / iframe 再杀 DSH 进程，并调整 `dsh-app-exiting` 事件顺序（先于 kill 发出），避免后端被杀瞬间 iframe 闪现 DSH 的「加载失败」错误页。
 - **启动变慢 / 像反复初始化**：`--no-open` 能力探测结果缓存到 `~/.dsh/.no-open-supported`，后续启动跳过这次约 3s 的 node 探测，加快启动。
+- **解压闪 cmd 窗口**：Node 归档解压调用 `tar.exe` 补 `CREATE_NO_WINDOW`，消除初始化下载 Node 时仍会弹出的控制台窗口。
+- **清空 `~/.dsh` 后首启 30s 超时**：npm 全局安装未保证把 dsh 内部的 `@deepseek-ai/*` 依赖 hoist 到顶层，导致内置 `@iyam/*` 插件 `import '@deepseek-ai/dsh-settings'` 报 `ERR_MODULE_NOT_FOUND`、DSH 起不来。新增兜底：安装/升级提升后把 dsh 嵌套的 `@deepseek-ai/*` 提升到 `~/.dsh/node_modules/@deepseek-ai/` 顶层（仅补缺失），让插件可解析。
 
 ### 增强
 
-- **预装插件市场**：首次启动（及后续缺失时）自动经 `dsh plugin --profile web add dshmarket` 安装插件市场 `dshmarket`，用户开箱即可浏览/一键安装社区插件；幂等且失败仅告警、不阻断启动。
+- **插件市场改为询问安装**：启动完成后若 `dshmarket` 尚未安装，弹窗询问用户是否安装；点击「安装」才经 `dsh plugin --profile web add dshmarket` 安装，点击「暂不安装」则不安装、不影响功能。不再首启强制联网安装，无网络/不需要时不再拖慢启动。
 
 ## [0.1.0] - 2026-08-20
 

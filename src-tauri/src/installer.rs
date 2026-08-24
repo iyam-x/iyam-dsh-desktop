@@ -354,7 +354,7 @@ pub(crate) async fn ensure_dshmarket(app: &tauri::AppHandle) {
 }
 
 /// 市场是否已安装：profile 的 bundles 含 dshmarket 且包已落地。
-fn dshmarket_installed(home: &PathBuf) -> bool {
+pub(crate) fn dshmarket_installed(home: &PathBuf) -> bool {
     let profile_pkg = home.join("profiles").join("web").join("package.json");
     let in_bundles = profile_pkg
         .exists()
@@ -736,5 +736,17 @@ pub(crate) fn managed_node(home: &PathBuf) -> PathBuf {
         base.join("node.exe")
     } else {
         base.join("bin").join("node")
+    }
+}
+
+/// 前端弹窗后由用户确认安装 dshmarket 插件市场时调用。
+/// 幂等：已装则跳过；失败回传错误（由前端展示），绝不阻断主流程。
+#[tauri::command]
+pub(crate) async fn install_dshmarket(app: tauri::AppHandle) -> Result<(), String> {
+    crate::installer::ensure_dshmarket(&app).await;
+    if dshmarket_installed(&dsh_home()) {
+        Ok(())
+    } else {
+        Err("dshmarket 安装失败（请检查网络后重试）".into())
     }
 }

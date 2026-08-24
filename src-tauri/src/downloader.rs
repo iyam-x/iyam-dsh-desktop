@@ -98,6 +98,9 @@ pub async fn bootstrap_dsh(app: &AppHandle, home: &PathBuf) -> Result<PathBuf, S
     let version = latest_dsh_version().await?;
     log::info!("安装 dsh {} (全局) 到 {:?}", version, home);
     install_dsh_to_tmp(app, &node, &version, home).await?;
+    // 把 dsh 内部嵌套的 @deepseek-ai/* 依赖提升到顶层，供 @iyam 插件解析
+    // （npm 全局安装未保证 hoist，@iyam 插件从顶层 node_modules 向上找会找不到）。
+    hoist_nested_dsh_deps(home);
     emit_progress(app, "done", 1.0);
     Ok(node)
 }
@@ -209,6 +212,8 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
     // 4. 重建 dsh 启动器 wrapper
     let node = crate::installer::managed_node(home);
     let _ = crate::installer::create_wrappers(home, &node);
+    // 提升后同样把嵌套 @deepseek-ai/* 依赖提到顶层，供 @iyam 插件解析。
+    hoist_nested_dsh_deps(home);
     log::info!("已提升 dsh 到 {}", staged);
     true
 }
@@ -381,8 +386,15 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<(), String> {
     } else {
         "tar".to_string()
     };
-    let out = Command::new(&tar)
-        .args(["-xf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
+    let mut cmd = Command::new(&tar);
+    cmd.args(["-xf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()]);
+    // Windows：tar.exe 是控制台程序，默认会闪一个 cmd 窗口。加 CREATE_NO_WINDOW
+    // 让其后台静默解压（首次下载 node / 升级解压归档时都会走到）。
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("解压命令失败: {}", e))?;
     if !out.status.success() {
@@ -610,6 +622,69 @@ fn kill_process_tree(pid: u32) {
     {
         unsafe {
             libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
+/// 把 dsh 内部嵌套的 `@deepseek-ai/*` 依赖提升到顶层 `node_modules/@deepseek-ai/`。
+///
+/// 背景：本 app 内置的 `@iyam/*` 插件（如 `dsh-rtui-ui`）会 `import`
+/// `@deepseek-ai/dsh-settings` 等包。它们的安装位置在顶层
+/// `~/.dsh/node_modules/@deepseek-ai/`，而 Node ESM 解析只**向上**查找，不会下钻到
+/// 其他包的嵌套 `node_modules`。npm 全局安装未必把这些依赖 hoist 到顶层（实测一次干净
+/// 安装里 `dsh-settings` 只出现在
+/// `node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`），于是 `@iyam` 插件
+/// 解析失败、DSH 启动直接报 `ERR_MODULE_NOT_FOUND`、30s 端口超时。
+///
+/// 兜底：把 dsh 核心包内部嵌套的 `@deepseek-ai/*` 软链/复制到顶层（仅当顶层缺失时），
+/// 让 `@iyam` 插件能找到。失败仅告警，不阻断启动（部分版本布局不同属正常）。
+fn hoist_nested_dsh_deps(home: &PathBuf) {
+    let nested = home
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("node_modules")
+        .join("@deepseek-ai");
+    let top = home.join("node_modules").join("@deepseek-ai");
+    if !nested.is_dir() {
+        return;
+    }
+    let entries = match fs::read_dir(&nested) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let dest = top.join(&name);
+        if dest.exists() {
+            continue; // 顶层已有，不覆盖（顶层优先）
+        }
+        let src = entry.path();
+        let res = if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+            // 软链：直接建同名软链指向原目标
+            if let Ok(target) = src.read_link() {
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(&target, &dest).map(|_| ())
+                }
+                #[cfg(windows)]
+                {
+                    let _ = target;
+                    fs::create_dir_all(&dest).ok();
+                    Ok(())
+                }
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "read_link failed"))
+            }
+        } else if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            copy_dir_follow_symlinks(&src, &dest)
+        } else {
+            fs::copy(&src, &dest).map(|_| ())
+        };
+        if let Err(e) = res {
+            log::warn!("hoist 依赖 {} 失败: {}", name.to_string_lossy(), e);
+        } else {
+            log::info!("hoist 依赖到顶层: {}", name.to_string_lossy());
         }
     }
 }

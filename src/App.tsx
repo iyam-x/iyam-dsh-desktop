@@ -62,6 +62,10 @@ export default function App() {
   const closePreview = () => setPreview(null);
   // 标记应用正在退出（用户主动退出），用于抑制退出时 DSH 进程被杀触发的崩溃卡片一闪。
   const exitingRef = useRef(false);
+  // 启动完成后是否展示「安装插件市场」询问弹窗（仅当 dshmarket 尚未安装时）。
+  const [marketOffer, setMarketOffer] = useState(false);
+  const [marketInstalling, setMarketInstalling] = useState(false);
+  const [marketError, setMarketError] = useState<string | null>(null);
 
   // 打开 DSH 转发来的文件预览：按扩展名分图片/音视频(读二进制)与文本/代码(读全文)。
   async function openPreview(path: string) {
@@ -197,6 +201,12 @@ export default function App() {
       });
     }).catch(() => {});
 
+    // 启动成功后，若 dshmarket 尚未安装，后端会发来该事件，前端弹窗让用户选择是否安装。
+    listen<void>("dshmarket-offer-install", () => {
+      if (exitingRef.current) return;
+      setMarketOffer(true);
+    }).catch(() => {});
+
     return () => {
       cancelled = true;
     };
@@ -299,6 +309,25 @@ export default function App() {
       /* 忽略持久化失败 */
     }
   };
+
+  // 用户确认安装插件市场 dshmarket（后端幂等：已装跳过；失败回传错误）。
+  async function installMarket() {
+    setMarketInstalling(true);
+    setMarketError(null);
+    try {
+      await invoke("install_dshmarket");
+      setMarketOffer(false);
+    } catch (err) {
+      setMarketError(String(err));
+    } finally {
+      setMarketInstalling(false);
+    }
+  }
+
+  // 用户拒绝安装：仅关闭弹窗，不影响任何功能。
+  function declineMarket() {
+    setMarketOffer(false);
+  }
 
   if (state.status === "error") {
     return (
@@ -408,6 +437,26 @@ export default function App() {
           />
         )}
       </div>
+      {marketOffer && (
+        <div className="modal-overlay" onClick={declineMarket}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>安装插件市场？</h3>
+            <p className="modal-desc">
+              是否安装 DeepSeek Harness 插件市场（dshmarket）？安装后可在应用内浏览与安装更多插件。
+              稍后也可在终端运行 <code>{`~/.dsh/bin/${DSH_CLI} plugin --profile web add dshmarket`}</code> 手动安装。
+            </p>
+            {marketError && <p className="modal-error">{marketError}</p>}
+            <div className="modal-actions">
+              <button className="btn-ghost" onClick={declineMarket} disabled={marketInstalling}>
+                暂不安装
+              </button>
+              <button className="btn-primary" onClick={installMarket} disabled={marketInstalling}>
+                {marketInstalling ? "安装中..." : "安装"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

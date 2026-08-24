@@ -132,8 +132,8 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     if let Err(e) = crate::installer::refresh_file_handler_plugin(&app) {
         log::warn!("refresh file-handler plugin failed: {}", e);
     }
-    // 预装插件市场 dshmarket（幂等：已装则跳过；失败仅告警，不阻断启动）。
-    crate::installer::ensure_dshmarket(&app).await;
+    // 不在此自动预装 dshmarket，改为启动完成后弹窗让用户选择（见下方 dsh-port-ready 后）。
+    // 这样无网络/不需要市场时不会拖慢首启，也不强制安装。
 
     // Check if already running via PID file
     let pid_file = home.join(".iyam-dsh.pid");
@@ -282,6 +282,12 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
                 }
                 *global = Some(child);
             }
+
+            // 启动成功：若 dshmarket 市场尚未安装，弹窗询问用户是否安装（不强制）。
+            if !crate::installer::dshmarket_installed(&home) {
+                let _ = app.emit("dshmarket-offer-install", ());
+            }
+
             let exit_app = app.clone();
             std::thread::spawn(move || {
                 // 先取出 child 并立即释放锁，再 wait，避免持有锁期间阻塞导致死锁
