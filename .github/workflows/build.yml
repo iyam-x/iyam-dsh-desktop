@@ -71,8 +71,11 @@ jobs:
           node scripts/fetch-dsh.mjs
           node scripts/fetch-node.mjs
 
+      # 固定到 v0.5.25：@v0 浮动的 v0.6.x 自身有 webpack top-level await 打包 bug，
+      # 会在 runner 上直接崩溃（三个平台同时失败）。v0.5.25 是稳定的老版本。
+      # 包管理器检测：仓库已删 pnpm-lock.yaml，仅留 package-lock.json → 走 npm。
       - name: Build with tauri-action
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v0.5.25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 可选：填入以下 Secret 即可自动签名/公证 macOS 产物。留空则产出未签名包。
