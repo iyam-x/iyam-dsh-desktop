@@ -1,7 +1,8 @@
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 #[cfg(windows)]
@@ -321,6 +322,150 @@ fn inject_plugins_and_patches(app: &tauri::AppHandle) -> Result<(), String> {
     }
     ensure_picker_owner_patch(&home);
     Ok(())
+}
+
+/// 预装插件市场 dshmarket：经 DSH 自带的 `dsh plugin --profile web add dshmarket` 安装，
+/// 由 DSH 负责 pnpm 安装并自动注册到 web profile 的 `dsh.profile.bundles`。
+///
+/// 幂等：profile 的 bundles 已含 `dshmarket` 且包已装到 `profiles/web/node_modules/dshmarket`
+/// 时直接跳过，避免每次启动重复下载。失败（无网络 / pnpm 缺失）仅告警并 continue，
+/// 绝不阻断首次启动——市场是增强项，非核心功能。
+pub(crate) async fn ensure_dshmarket(app: &tauri::AppHandle) {
+    let home = dsh_home();
+    if dshmarket_installed(&home) {
+        return;
+    }
+    let cli = match detect_dsh_cli() {
+        Some(c) => c,
+        None => {
+            log::warn!("ensure_dshmarket: dsh cli 未找到，跳过市场预装");
+            return;
+        }
+    };
+    let app_c = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || run_dsh_plugin_add(&cli, &home))
+        .await;
+    match res {
+        Ok(Ok(())) => log::info!("已预装 dshmarket 插件市场"),
+        Ok(Err(e)) => log::warn!("预装 dshmarket 失败（不影响核心功能）: {}", e),
+        Err(e) => log::warn!("预装 dshmarket 线程失败: {}", e),
+    }
+    let _ = app_c;
+}
+
+/// 市场是否已安装：profile 的 bundles 含 dshmarket 且包已落地。
+fn dshmarket_installed(home: &PathBuf) -> bool {
+    let profile_pkg = home.join("profiles").join("web").join("package.json");
+    let in_bundles = profile_pkg
+        .exists()
+        .then(|| fs::read_to_string(&profile_pkg).ok())
+        .flatten()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .map(|v| {
+            v.get("dsh")
+                .and_then(|d| d.get("profile"))
+                .and_then(|p| p.get("bundles"))
+                .and_then(|b| b.as_array())
+                .map(|a| a.iter().any(|x| x.as_str() == Some("dshmarket")))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    in_bundles
+        && home
+            .join("profiles")
+            .join("web")
+            .join("node_modules")
+            .join("dshmarket")
+            .exists()
+}
+
+/// 用托管 node 跑 `dsh plugin --profile web add dshmarket`（DSH 内部 spawnSync pnpm）。
+/// 管道化输出、隐藏控制台窗、整体超时（避免无网络时挂死首次启动）。
+fn run_dsh_plugin_add(cli: &PathBuf, home: &PathBuf) -> Result<(), String> {
+    const TIMEOUT: u64 = 5 * 60; // 5 分钟整体超时
+    let mut cmd = Command::new(cli);
+    cmd.arg("plugin")
+        .arg("--profile")
+        .arg("web")
+        .arg("add")
+        .arg("dshmarket")
+        .env("DSH_HOME", home.to_string_lossy().to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW：避免安装时闪控制台窗
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 dsh plugin add 失败: {}", e))?;
+    let pid = child.id();
+
+    // 排空 stdout/stderr，避免管道缓冲区写满导致进程阻塞挂死。
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let drain = |r: std::process::ChildStdout| {
+        let reader = BufReader::new(r);
+        for line in reader.lines().map_while(Result::ok) {
+            log::info!("[dshmarket] {}", line);
+        }
+    };
+    let drain2 = |r: std::process::ChildStderr| {
+        let reader = BufReader::new(r);
+        for line in reader.lines().map_while(Result::ok) {
+            log::info!("[dshmarket] {}", line);
+        }
+    };
+    let h1 = std::thread::spawn(move || drain(stdout));
+    let h2 = std::thread::spawn(move || drain2(stderr));
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::process::ExitStatus>>();
+    let waiter = std::thread::spawn(move || {
+        let _ = tx.send(child.wait().ok());
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_secs(TIMEOUT)) {
+        Ok(Some(status)) => {
+            let _ = h1.join();
+            let _ = h2.join();
+            let _ = waiter.join();
+            if status.success() {
+                Ok(())
+            } else {
+                Err("dsh plugin add 退出码非零".into())
+            }
+        }
+        Ok(None) => {
+            let _ = h1.join();
+            let _ = h2.join();
+            let _ = waiter.join();
+            Err("无法等待 dsh plugin add 进程".into())
+        }
+        Err(_) => {
+            kill_process_tree(pid);
+            let _ = h1.join();
+            let _ = h2.join();
+            let _ = waiter.join();
+            Err(format!("dsh plugin add 超时（>{}s）", TIMEOUT))
+        }
+    }
+}
+
+/// 跨平台杀整棵进程树（pnpm 会派生子进程）。
+fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(0x0800_0000)
+            .output();
+    }
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
 }
 
 /// 启动早期调用的升级生效检查：若 `~/.dsh/.update.json` 标记有已备货的新版本，

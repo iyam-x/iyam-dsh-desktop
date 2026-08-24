@@ -10,6 +10,7 @@ DeepSeek Harness（DSH）的跨平台原生桌面客户端。首次启动时会*
 - **跨平台**：macOS（Intel / Apple Silicon）、Windows 10/11、主流 Linux 发行版。
 - **完整 DSH 生态兼容**：`dsh plugin add/remove`、Agent Presets、Cordis 插件系统、内核升级等全部可用。
 - **系统通知点击唤起**：对话完成后的系统通知，点击即可把应用窗口带到前台。
+- **内置插件市场**：首次启动自动预装 `dshmarket` 插件市场，开箱即可浏览、搜索、一键安装社区插件。
 
 ## 安装包下载
 

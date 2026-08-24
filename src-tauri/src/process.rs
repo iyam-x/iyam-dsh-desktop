@@ -132,6 +132,8 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     if let Err(e) = crate::installer::refresh_file_handler_plugin(&app) {
         log::warn!("refresh file-handler plugin failed: {}", e);
     }
+    // 预装插件市场 dshmarket（幂等：已装则跳过；失败仅告警，不阻断启动）。
+    crate::installer::ensure_dshmarket(&app).await;
 
     // Check if already running via PID file
     let pid_file = home.join(".iyam-dsh.pid");
