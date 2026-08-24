@@ -853,7 +853,7 @@ pub(crate) fn ensure_taskbar_preload(home: &std::path::Path) -> Result<(), Strin
         .map_err(|e| format!("写入任务栏预加载脚本失败: {}", e))
 }
 
-fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;

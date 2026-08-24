@@ -32,7 +32,7 @@ pub fn kill_dsh_on_exit() {
         let _pid = child.id();
         #[cfg(windows)]
         {
-            taskkill_tree(pid);
+            taskkill_tree(_pid);
             let _ = child.kill();
         }
         #[cfg(not(windows))]
