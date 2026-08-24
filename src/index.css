@@ -102,6 +102,27 @@ body,
   color: #fff;
 }
 
+/* 标题栏「检查 dsh 更新」下拉按钮：与主操作色一致的中性控制按钮 */
+.tb-update {
+  color: #94a3b8;
+}
+.tb-update:hover {
+  background: #ddd;
+  color: #6366f1;
+}
+
+/* Windows/Linux：更新按钮与窗口三键之间留出间距（位于系统菜单左侧） */
+.tb-update-gap {
+  width: 12px;
+  height: 100%;
+  flex: 0 0 auto;
+}
+
+/* macOS：更新按钮靠右排列（原生红绿灯在左侧，互不遮挡） */
+.title-bar-controls--mac {
+  margin-left: auto;
+}
+
 /* Loading / Installing state */
 .install-card {
   text-align: center;
@@ -131,6 +152,29 @@ body,
   color: #64748b;
   margin-top: 16px;
   line-height: 1.5;
+}
+
+/* Install progress bar */
+.install-progress {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(71, 85, 105, 0.4);
+  overflow: hidden;
+  margin: 18px 0 4px;
+}
+
+.install-progress-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #6366f1, #818cf8);
+  transition: width 0.4s ease;
+}
+
+.install-progress-pct {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 8px;
 }
 
 /* Spinner */

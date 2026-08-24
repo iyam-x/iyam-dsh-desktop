@@ -13,6 +13,7 @@ interface InstallState {
   message: string;
   port?: number;
   error?: string;
+  progress?: number;
 }
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"]);
@@ -102,8 +103,18 @@ export default function App() {
         setState({
           status: "installing",
           message: "正在安装 DeepSeek Harness...",
+          progress: 0,
         });
-        const installResult = await invoke<any>("check_and_install");
+        // 前端兜底超时：后端 npm install 有 15 分钟整体超时，此处 16 分钟作为
+        // 最后防线，确保任何意外都不会让界面永久卡在转圈。
+        const installPromise = invoke<any>("check_and_install");
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("安装超时，请检查网络后重试")),
+            16 * 60 * 1000
+          )
+        );
+        await Promise.race([installPromise, timeoutPromise]);
         if (cancelled) return;
         setState({ status: "loading", message: "正在启动 DeepSeek Harness..." });
       } catch (err) {
@@ -132,6 +143,28 @@ export default function App() {
     }
 
     init();
+
+    // 安装进度（后端 dsh-install-progress 事件）：首次安装需联网下载运行环境，
+    // 把阶段与进度透出，避免"永久转圈=卡死"的体感。
+    listen<{ stage: string; progress: number }>("dsh-install-progress", (event: Event<{ stage: string; progress: number }>) => {
+      const { stage, progress } = event.payload;
+      const stageText: Record<string, string> = {
+        "downloading-node": "正在下载 Node 运行环境...",
+        "installing-dsh": "正在准备安装 DeepSeek Harness...",
+        "resolving-deps": "正在解析依赖...",
+        "downloading-deps": "正在下载依赖（首次较慢，请耐心等待）...",
+        "finalizing": "正在收尾部署...",
+        "done": "安装完成",
+      };
+      setState((prev) => {
+        if (prev.status !== "installing") return prev;
+        return {
+          ...prev,
+          message: stageText[stage] || "正在安装 DeepSeek Harness...",
+          progress: typeof progress === "number" ? progress : prev.progress,
+        };
+      });
+    }).catch(() => {});
 
     // Listen for port-ready events (from existing process or fresh start)
     listen<number>("dsh-port-ready", (event: Event<number>) => {
@@ -268,7 +301,7 @@ export default function App() {
             <button onClick={() => window.location.reload()}>重试</button>
             <p className="error-hint">
               也可手动在终端运行：
-              <code>{`~/.iyam-dsh/bin/${DSH_CLI} web`}</code>
+              <code>{`~/.dsh/bin/${DSH_CLI} web`}</code>
             </p>
           </div>
         </div>
@@ -291,7 +324,7 @@ export default function App() {
             <button onClick={() => invoke("restart_dsh")}>重启 DSH</button>
             <p className="error-hint">
               也可手动在终端运行：
-              <code>{`~/.iyam-dsh/bin/${DSH_CLI} web`}</code>
+              <code>{`~/.dsh/bin/${DSH_CLI} web`}</code>
             </p>
           </div>
         </div>
@@ -300,6 +333,7 @@ export default function App() {
   }
 
   if (state.status === "installing") {
+    const pct = Math.round((state.progress ?? 0) * 100);
     return (
       <div className="app-shell">
         <TitleBar rightOffset={preview ? dockWidth : 0} />
@@ -308,8 +342,15 @@ export default function App() {
             <div className="spinner" />
             <h2>正在安装 DeepSeek Harness</h2>
             <p>{state.message}</p>
+            <div className="install-progress">
+              <div
+                className="install-progress-bar"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <div className="install-progress-pct">{pct}%</div>
             <div className="install-tip">
-              正在从内置资源部署（约 300MB），无需网络，请耐心等待...
+              首次安装需联网下载运行环境（国内镜像），请保持网络畅通...
             </div>
           </div>
         </div>

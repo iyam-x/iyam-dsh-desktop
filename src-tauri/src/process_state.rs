@@ -44,12 +44,12 @@ pub fn kill_dsh_on_exit() {
 
     // 兜底：守护线程在 start_dsh 成功后立即把 child 从 DSH_CHILD 取走并独占（阻塞
     // 在 c.wait() 等 node 退出），因此退出清理通常拿不到 child 句柄，仅靠上面会漏杀
-    // node。node 的 PID 始终写在 <home>/dsh.pid（本次 spawn 或上次会话残留都成立），
-    // 按 PID 递归杀整棵进程树兜底。本函数在 dsh.pid 被删除之前调用，文件必然可读。
+    // node。node 的 PID 始终写在 <home>/.iyam-dsh.pid（本次 spawn 或上次会话残留都成立），
+    // 按 PID 递归杀整棵进程树兜底。本函数在 .iyam-dsh.pid 被删除之前调用，文件必然可读。
     #[cfg(windows)]
     {
         if let Ok(pid_str) =
-            std::fs::read_to_string(crate::installer::dsh_home().join("dsh.pid"))
+            std::fs::read_to_string(crate::installer::dsh_home().join(".iyam-dsh.pid"))
         {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
                 if pid != 0 {

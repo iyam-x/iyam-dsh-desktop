@@ -3,6 +3,7 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { Menu, MenuItem } from "@tauri-apps/api/menu";
+import { TitleBarUpdateButton } from "./TitleBarUpdateButton";
 
 // Windows 系统标题按钮字形（Segoe Fluent/MDL2 Assets 系统字体，Win10 1809+ 自带）
 const ICON = {
@@ -93,7 +94,11 @@ export function TitleBar({ rightOffset = 0 }: { rightOffset?: number }) {
           e.stopPropagation();
           showMacTitleBarMenu(maximized).catch(() => {});
         }}
-      />
+      >
+        <div className="title-bar-controls title-bar-controls--mac">
+          <TitleBarUpdateButton />
+        </div>
+      </div>
     );
   }
 
@@ -112,6 +117,8 @@ export function TitleBar({ rightOffset = 0 }: { rightOffset?: number }) {
       }}
     >
       <div className="title-bar-controls" onMouseDown={stopDragPropagation}>
+        <TitleBarUpdateButton />
+        <span className="tb-update-gap" />
         <button
           className="tb-btn tb-minimize"
           onClick={() => getCurrentWindow().minimize()}

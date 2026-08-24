@@ -6,6 +6,7 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use tauri::Emitter;
 
 mod aumid;
+mod downloader;
 mod file_preview;
 mod installer;
 mod notify;
@@ -129,6 +130,7 @@ fn main() {
             process::start_dsh,
             process::stop_dsh,
             updater::check_for_update,
+            updater::trigger_dsh_update,
             window::show_system_menu,
             window::open_devtools,
             tray_commands::restart_dsh,
@@ -145,8 +147,8 @@ fn main() {
         if let RunEvent::ExitRequested { .. } = event {
             process_state::kill_dsh_on_exit();
             let home = installer::dsh_home();
-            let _ = std::fs::remove_file(home.join("dsh.pid"));
-            let _ = std::fs::remove_file(home.join("dsh.port"));
+            let _ = std::fs::remove_file(home.join(".iyam-dsh.pid"));
+            let _ = std::fs::remove_file(home.join(".iyam-dsh.port"));
             // 通知前端应用正在退出（可选）
             let _ = app_handle.emit("dsh-app-exiting", ());
         }
@@ -163,8 +165,8 @@ mod tray_commands {
     pub async fn restart_dsh(app: tauri::AppHandle) -> Result<(), String> {
         kill_dsh_on_exit();
         let home = crate::installer::dsh_home();
-        std::fs::remove_file(home.join("dsh.pid")).ok();
-        std::fs::remove_file(home.join("dsh.port")).ok();
+        std::fs::remove_file(home.join(".iyam-dsh.pid")).ok();
+        std::fs::remove_file(home.join(".iyam-dsh.port")).ok();
         start_dsh(app).await?;
         Ok(())
     }

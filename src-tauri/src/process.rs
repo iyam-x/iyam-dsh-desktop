@@ -14,20 +14,19 @@ use regex::Regex;
 use tauri::Emitter;
 use tauri::Manager;
 
-use crate::installer::{bundled_node, dsh_home, get_install_status, refresh_dsh_core, InstallStatus};
+use crate::installer::{detect_dsh_cli, dsh_home, get_install_status, refresh_dsh_core, InstallStatus};
 use crate::process_state::DSH_CHILD;
 
-/// 探测当前 bundle 的 DSH 是否支持 `--no-open`。
+/// 探测 DSH 是否支持 `--no-open`。
 ///
 /// 背景：rc.7 及更早版本 `web` 命令不认识 `--no-open`，commander 会立即报
 /// "unknown option '--no-open'" 并退出，导致 DSH 后端起不来、界面操作全废。
-/// 但"哪个版本开始支持"不可靠（曾误以为 rc.8 就支持，实际并非如此），故不靠
-/// 版本号硬猜，而是**实际拉起一次**观察：若进程因 unknown option 立即退出 → 不支持；
-/// 若 3s 内仍在运行（说明参数被接受、server 已起）→ 支持。探测进程会被杀掉，不影响正式启动。
-fn dsh_supports_no_open(node: &PathBuf, bin_js: &PathBuf, home: &PathBuf) -> bool {
-    let mut cmd = Command::new(node);
+/// 但"哪个版本开始支持"不可靠，故不靠版本号硬猜，而是**实际拉起一次**观察：
+/// 若进程因 unknown option 立即退出 → 不支持；若 3s 内仍在运行（说明参数被接受、
+/// server 已起）→ 支持。探测进程会被杀掉，不影响正式启动。
+fn dsh_supports_no_open(cli: &PathBuf, home: &PathBuf) -> bool {
+    let mut cmd = Command::new(cli);
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
-        .arg(bin_js)
         .arg("web")
         .arg("--no-open")
         .arg("--port")
@@ -76,23 +75,21 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     let home = dsh_home();
     log::info!("DSH_HOME: {:?}", home);
 
-    let node = bundled_node(&app)
-        .ok_or("内置 Node 运行时未找到，请重新安装应用。")?;
-    log::info!("bundled node: {:?}", node);
-
-    // 确保已安装（未安装时才拷贝，避免每次启动重复拷贝）
-    if get_install_status(app.clone()).await != InstallStatus::Installed {
+    // 确保已安装：系统已有 dsh 则仅注入插件；否则运行时下载 node+dsh 装到 ~/.dsh。
+    if get_install_status(app.clone()) != InstallStatus::Installed {
         log::info!("DSH not installed yet, installing...");
         crate::installer::check_and_install(app.clone()).await?;
     }
 
-    // 内置 DSH 核心版本与 DSH_HOME 部署版本不一致时重新部署（bundle 升级后旧核心
-    // 会残留，导致新资源不生效）。必须在入口校验、已运行早退、插件刷新之前执行。
+    // 升级生效检查：若 ~/.dsh/.update.json 标记有已备货的新版本，提升到正式目录。
+    // 必须在入口校验、已运行早退、插件刷新之前执行。
     if let Err(e) = refresh_dsh_core(&app) {
         log::warn!("refresh dsh core failed: {}", e);
     }
 
-    let bin_js = home.join("lib").join("bin.js");
+    // 启动 dsh CLI（系统 dsh 或 ~/.dsh/bin/dsh）
+    let cli = detect_dsh_cli().ok_or("未找到 dsh 命令，请检查安装或网络后重试。")?;
+    let bin_js = crate::installer::dsh_core_dir(&home).join("lib").join("bin.js");
     if !bin_js.exists() {
         return Err(format!("DSH 入口文件不存在: {:?}", bin_js));
     }
@@ -117,12 +114,12 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     }
 
     // Check if already running via PID file
-    let pid_file = home.join("dsh.pid");
+    let pid_file = home.join(".iyam-dsh.pid");
     if pid_file.exists() {
         let pid_str = fs::read_to_string(&pid_file).unwrap_or_default();
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
             if is_process_alive(pid) {
-                let port_file = home.join("dsh.port");
+                let port_file = home.join(".iyam-dsh.port");
                 if !needs_dsh_restart && port_file.exists() {
                     if let Ok(port_str) = fs::read_to_string(&port_file) {
                         if let Ok(port) = port_str.trim().parse::<u16>() {
@@ -146,12 +143,12 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
 
     // 运行时探测 DSH 是否支持 `--no-open`（旧版本不支持会直接退出、后端起不来）。
     // 支持才传，避免弹系统浏览器；不支持则不传，保证 DSH 一定能启动。
-    let no_open = dsh_supports_no_open(&node, &bin_js, &home);
+    let no_open = dsh_supports_no_open(&cli, &home);
     log::info!("DSH --no-open supported: {}", no_open);
 
-    let mut cmd = Command::new(&node);
+    let mut cmd = Command::new(&cli);
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
-       .arg(&bin_js).arg("web");
+       .arg("web");
     if no_open {
         cmd.arg("--no-open");
     }
@@ -225,7 +222,7 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     });
 
     // Drain stderr（只传 stderr pipe），并落盘便于排查 DSH 行为
-    let stderr_log = home.join("dsh-stderr.log");
+    let stderr_log = home.join(".iyam-dsh-stderr.log");
     std::thread::spawn(move || {
         use std::io::Write;
         let reader = BufReader::new(stderr);
@@ -250,7 +247,9 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     // Wait for port with 30s timeout
     match port_handle.join() {
         Ok(Some(port)) => {
-            fs::write(home.join("dsh.port"), port.to_string()).ok();
+            // 若本次启动来自刚提升的升级版本，确认成功后清除 applying 标记
+            crate::downloader::clear_applying(&home);
+            fs::write(home.join(".iyam-dsh.port"), port.to_string()).ok();
             let _ = app.emit("dsh-port-ready", port);
 
             // 成功后才将 child 存入全局静态，并启动守护线程监听进程退出
@@ -281,6 +280,10 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
             // 超时或端口读取失败：child 仍在作用域内，直接 kill
             child.kill().ok();
             fs::remove_file(&pid_file).ok();
+            // 若本次启动来自刚提升的升级版本且起不来，回滚到上一个可用版本
+            if crate::downloader::rollback_after_failure(&home) {
+                let _ = app.emit("dsh-update-failed", ());
+            }
             Err("DSH 启动超时（30s），请查看日志".to_string())
         }
     }
@@ -291,8 +294,8 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
 pub async fn stop_dsh() -> Result<(), String> {
     crate::process_state::kill_dsh_on_exit();
     let home = dsh_home();
-    fs::remove_file(home.join("dsh.pid")).ok();
-    fs::remove_file(home.join("dsh.port")).ok();
+    fs::remove_file(home.join(".iyam-dsh.pid")).ok();
+    fs::remove_file(home.join(".iyam-dsh.port")).ok();
     Ok(())
 }
 

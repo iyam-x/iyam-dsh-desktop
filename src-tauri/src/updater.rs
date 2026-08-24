@@ -1,4 +1,5 @@
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -9,24 +10,82 @@ pub struct UpdateInfo {
     pub installed: String,
     pub latest: String,
     pub has_update: bool,
+    /// 该 dsh 是否由本 app 托管（app 帮装的才由 app 升级；用户自管的不动）。
+    pub managed: bool,
 }
 
 #[tauri::command]
-pub async fn check_for_update() -> Result<UpdateInfo, String> {
+pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     let installed = get_installed_version().await?;
-    let latest = get_latest_version().await?;
+    let latest = crate::downloader::latest_dsh_version().await?;
+    let has_update = is_newer(&latest, &installed);
+    let managed = crate::installer::is_managed();
 
-    let has_update = match (semver::Version::parse(&latest), semver::Version::parse(&installed)) {
-        (Ok(v), Ok(installed_v)) => v > installed_v,
-        (Ok(_v), Err(_)) => true,
-        _ => false,
-    };
+    // 托管态且有新版本：后台自动备货（24h 节流，不阻塞返回）
+    if managed && has_update {
+        maybe_auto_stage(&app, &latest).await;
+    }
 
     Ok(UpdateInfo {
         installed,
         latest,
         has_update,
+        managed,
     })
+}
+
+/// 手动触发检查并更新（前端"检查并更新"按钮）：立即备货到下次启动生效。
+#[tauri::command]
+pub async fn trigger_dsh_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+    let latest = crate::downloader::latest_dsh_version().await?;
+    let installed = get_installed_version().await?;
+    if crate::installer::is_managed() {
+        crate::downloader::stage_update(&app, &dsh_home(), &latest)
+            .await
+            .map_err(|e| format!("备货失败: {}", e))?;
+    }
+    let has_update = is_newer(&latest, &installed);
+    Ok(UpdateInfo {
+        installed,
+        latest: latest.clone(),
+        has_update,
+        managed: crate::installer::is_managed(),
+    })
+}
+
+/// 托管态下，超过 24h 未自动检查则后台发起一次备货（fire-and-forget）。
+async fn maybe_auto_stage(app: &tauri::AppHandle, latest: &str) {
+    let home = dsh_home();
+    let stamp = home.join(".last-update-check");
+    if let Ok(c) = fs::read_to_string(&stamp) {
+        if let Ok(t) = c.trim().parse::<u64>() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now.saturating_sub(t) < 24 * 3600 {
+                return; // 24h 内已查过
+            }
+        }
+    }
+    let _ = fs::write(
+        &stamp,
+        format!(
+            "{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ),
+    );
+
+    let app_c = app.clone();
+    let latest_c = latest.to_string();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::downloader::stage_update(&app_c, &dsh_home(), &latest_c).await {
+            log::warn!("自动备货失败: {}", e);
+        }
+    });
 }
 
 async fn get_installed_version() -> Result<String, String> {
@@ -48,21 +107,10 @@ async fn get_installed_version() -> Result<String, String> {
         .unwrap_or_else(|| "unknown".to_string()))
 }
 
-async fn get_latest_version() -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://registry.npmjs.org/@deepseek-ai/dsh/latest")
-        .send()
-        .await
-        .map_err(|e| format!("无法获取最新版本: {}", e))?;
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析版本信息失败: {}", e))?;
-
-    body["dist-tags"]["latest"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "无法解析最新版本号".to_string())
+fn is_newer(latest: &str, installed: &str) -> bool {
+    match (semver::Version::parse(latest), semver::Version::parse(installed)) {
+        (Ok(l), Ok(i)) => l > i,
+        (Ok(_), Err(_)) => true, // 本地版本无法解析（如 unknown）→ 视为有更新
+        _ => false,
+    }
 }
