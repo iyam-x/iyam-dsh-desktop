@@ -35,14 +35,20 @@ pub struct DshInstallProgress {
     pub progress: f64,
 }
 
-/// Node 二进制镜像（按顺序回退）
+/// Node 二进制镜像（按顺序回退）。优先国内常见优秀镜像，最后兜底官方源。
 const NODE_MIRRORS: &[&str] = &[
     "https://registry.npmmirror.com/-/binary/node",
+    "https://mirrors.cloud.tencent.com/nodejs-release/",
+    "https://repo.huaweicloud.com/nodejs/",
     "https://nodejs.org/dist",
 ];
-/// dsh 的 npm registry（按顺序回退）
+
+/// dsh 的 npm registry（按顺序回退）。汇集国内常见优秀镜像，任一可用即可，
+/// 最后兜底官方 npmjs。用户环境若某镜像不可达（企业网/地区差异），自动尝试下一个。
 const NPM_REGISTRIES: &[&str] = &[
     "https://registry.npmmirror.com",
+    "https://mirrors.cloud.tencent.com/npm/",
+    "https://repo.huaweicloud.com/repository/npm/",
     "https://registry.npmjs.org",
 ];
 
@@ -56,6 +62,23 @@ fn emit_progress(app: &AppHandle, stage: &str, progress: f64) {
             progress,
         },
     );
+}
+
+/// 取 stderr 末段（最多 `max` 字符），避免把整段报错塞给用户；同时压缩多余空行。
+fn last_lines(s: &str, max: usize) -> String {
+    let trimmed: String = s
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if trimmed.len() <= max {
+        trimmed
+    } else {
+        // 保留末尾（npm 的关键错误通常在最后），并标注被截断
+        let start = trimmed.len() - max;
+        format!("…(已截断)\n{}", &trimmed[start..])
+    }
 }
 
 fn node_archive(target: &str) -> (&str, &str, &str) {
@@ -90,8 +113,8 @@ pub(crate) async fn latest_dsh_version() -> Result<String, String> {
 }
 
 /// 首次安装：确保 node 存在，以全局方式把 dsh 装到 home（落在 ~/.dsh 同树，npm 才采纳
-/// 该 prefix）。装完即全局布局（`home/node_modules/@deepseek-ai/dsh`），无需平铺搬运，
-/// 与手动 `npm i -g` 效果一致。返回 node 路径。
+/// 该 prefix）。装完即全局布局（类 Unix 为 `home/lib/node_modules/@deepseek-ai/dsh`），
+/// 无需平铺搬运，与手动 `npm i -g` 效果一致。返回 node 路径。
 pub async fn bootstrap_dsh(app: &AppHandle, home: &PathBuf) -> Result<PathBuf, String> {
     let node = ensure_node(app, home).await?;
     emit_progress(app, "installing-dsh", 0.6);
@@ -124,7 +147,7 @@ pub async fn stage_update(app: &AppHandle, home: &PathBuf, target_version: &str)
     fs::create_dir_all(&staging).map_err(|e| format!("创建 staging 失败: {}", e))?;
     install_dsh_to_tmp(app, &node, target_version, &staging).await?;
     emit_progress(app, "staging-deploy", 0.8);
-    // staging 已是全局布局（staging/node_modules/@deepseek-ai/dsh），无需平铺。
+    // staging 已是全局布局（类 Unix 为 staging/lib/node_modules/@deepseek-ai/dsh），无需平铺。
     let update = serde_json::json!({
         "staged_version": target_version,
         "status": "ready",
@@ -170,10 +193,11 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
     }
 
     log::info!("提升备货版本 {} → 正式目录", staged);
-    // 全局布局下 dsh 核心包位于 home/node_modules/@deepseek-ai/dsh。
-    let core = home.join("node_modules").join("@deepseek-ai").join("dsh");
+    // 全局布局下 dsh 核心包位于 <home>/lib/node_modules/@deepseek-ai/dsh（类 Unix）。
+    let core = crate::installer::dsh_core_dir(home);
     let staged_core = home
         .join(".staging")
+        .join("lib")
         .join("node_modules")
         .join("@deepseek-ai")
         .join("dsh");
@@ -183,6 +207,7 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
     let _ = fs::remove_dir_all(&backup);
     fs::create_dir_all(&backup).ok();
     let backup_core = backup
+        .join("lib")
         .join("node_modules")
         .join("@deepseek-ai")
         .join("dsh");
@@ -256,10 +281,11 @@ pub fn rollback_after_failure(home: &PathBuf) -> bool {
     let bad = v["staged_version"].as_str().unwrap_or("").to_string();
     log::warn!("升级版本 {} 启动失败，回滚到上一个可用版本", bad);
 
-    // 还原备份（全局布局：core 在 node_modules/@deepseek-ai/dsh）
+    // 还原备份（全局布局：core 在 <home>/lib/node_modules/@deepseek-ai/dsh，类 Unix）
     let backup = home.join(".backup");
-    let core = home.join("node_modules").join("@deepseek-ai").join("dsh");
+    let core = crate::installer::dsh_core_dir(home);
     let backup_core = backup
+        .join("lib")
         .join("node_modules")
         .join("@deepseek-ai")
         .join("dsh");
@@ -469,9 +495,11 @@ async fn install_dsh_to_tmp(
     let app_c = app.clone();
     let install_res = async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut last_err: Option<String> = None;
+        let mut tried: Vec<String> = Vec::new();
         for registry in NPM_REGISTRIES {
-            emit_progress(&app_c, "installing-dsh", 0.05);
-            match run_npm_install(&app_c, &node_c, &npm_c, &prefix_c, &version_c, registry) {
+            tried.push(registry.to_string());
+            emit_progress(&app_c, "installing-dsh", 0.1);
+            match run_npm_install(&app_c, &node_c, &npm_c, false, &prefix_c, &version_c, registry) {
                 Ok(()) => {
                     last_err = None;
                     break;
@@ -484,7 +512,15 @@ async fn install_dsh_to_tmp(
         }
         match last_err {
             None => Ok(()),
-            Some(e) => Err(format!("npm install dsh 失败: {}", e)),
+            Some(e) => {
+                // 已按 NPM_REGISTRIES 顺序回退（npmmirror 优先）。把尝试过的源都列出，
+                // 并提示默认就是用国内镜像，方便用户判断是网络问题还是镜像源故障。
+                let mirrors = tried.join("、");
+                Err(format!(
+                    "npm install dsh 失败（已依次尝试源：{}）：{}",
+                    mirrors, e
+                ))
+            }
         }
     })
     .await
@@ -493,23 +529,54 @@ async fn install_dsh_to_tmp(
 
     // 后处理：剥 sourceMappingURL（规避 404 刷屏）。全局布局下不做 flatten——
     // npm 已 hoisted，且 flatten_node_modules 会破坏兄弟包的自引用软链。
-    let dsh_pkg = prefix
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh");
+    let dsh_pkg = crate::installer::dsh_core_dir(prefix);
     if !dsh_pkg.exists() {
         return Err("dsh 安装产物结构异常".into());
     }
+
+    // 安装后自愈：npm install 可能因镜像分发了坏 tarball（如 `bin.js` 是坏壳子）而"成功"
+    // 返回，但 dsh 实际起不来。此处校验入口是否真能跑；不能跑则换源重装——
+    // 优先用官方 npmjs（canonical，tarball 最权威）覆盖坏镜像副本。
+    if !crate::installer::dsh_entry_runs(prefix) {
+        log::warn!("dsh 入口不可用（疑似镜像坏包），换官方源重装");
+        emit_progress(app, "repairing-dsh", 0.9);
+        let npm_c = npm_cli.clone();
+        let prefix_c = prefix.clone();
+        let version_c = version.to_string();
+        let node_c = node.clone();
+        let app_c = app.clone();
+        let repair = async_runtime::spawn_blocking(move || {
+            run_npm_install(
+                &app_c,
+                &node_c,
+                &npm_c,
+                true,
+                &prefix_c,
+                &version_c,
+                "https://registry.npmjs.org",
+            )
+        })
+        .await
+        .map_err(|e| format!("重装线程失败: {}", e))?;
+        repair?;
+        if !crate::installer::dsh_entry_runs(prefix) {
+            return Err("dsh 安装后入口仍不可用，可能镜像源均异常，请检查网络后重试。".into());
+        }
+    }
+
     emit_progress(app, "finalizing", 0.95);
     strip_source_mapping_urls(&dsh_pkg);
     Ok(())
 }
 
 /// 单次 npm install 尝试：piped stdout 实时发进度，整体 `DSH_INSTALL_TIMEOUT` 超时则杀整棵进程树。
+/// `prefer_online`：为 true 时加 `--prefer-online`，强制绕过本地 npm 缓存重新拉取
+/// （用于安装后自愈——本地缓存可能存了坏镜像 tarball，否则重装仍返回坏包）。
 fn run_npm_install(
     app: &AppHandle,
     node: &PathBuf,
     npm_cli: &PathBuf,
+    prefer_online: bool,
     prefix: &PathBuf,
     version: &str,
     registry: &str,
@@ -530,11 +597,32 @@ fn run_npm_install(
         .arg("--no-fund")
         .arg("--dangerously-allow-all-scripts")
         .arg("--loglevel")
-        .arg("http")
-        .arg("--registry")
+        .arg("http");
+    if prefer_online {
+        // 自愈重装：绕过本地缓存里可能存的坏镜像 tarball，强制向 registry 重新拉取。
+        cmd.arg("--prefer-online");
+    }
+    cmd.arg("--registry")
         .arg(registry)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // 关键：koffi 等原生依赖的安装脚本是 `sh -c node ./xxx.cjs`，新开的 /bin/sh 会在
+    // 系统 PATH 上找 node——而我们用的是托管 node（不在 PATH 上），于是报
+    // `sh: node: command not found`（npm error code 127）。把托管 node 所在目录前置到
+    // PATH，让这类脚本里的裸 `node` 能解析到正确的可执行文件。
+    if let Some(node_dir) = node.parent() {
+        if let Some(node_dir_s) = node_dir.to_str() {
+            let mut new_path = node_dir_s.to_string();
+            if let Ok(existing) = std::env::var("PATH") {
+                if !existing.is_empty() {
+                    new_path.push_str(":");
+                    new_path.push_str(&existing);
+                }
+            }
+            cmd.env("PATH", new_path);
+        }
+    }
 
     // Windows：node/npm 是控制台程序，默认会弹一个可见的 cmd 窗口。加 CREATE_NO_WINDOW
     // 让其后台静默运行（仅在真正下载/安装 dsh 时发生，避免初始化时闪窗）。
@@ -546,31 +634,40 @@ fn run_npm_install(
     let mut child = cmd.spawn().map_err(|e| format!("启动 npm 失败: {}", e))?;
     let pid = child.id();
 
-    // 读 stdout 发进度（npm --loglevel=http 会打印 reify 阶段与每个包）
+    // 读 stdout 发进度（npm --loglevel=http 会打印 reify 阶段与每个包）。
+    // npm 不提供字节级进度，这里用「单调爬升」近似：reify 之前的解析阶段在 0.1~0.2
+    // 间缓动，reify（下载/链接）开始后每收到一个包的行就往前走一点，封顶 0.9。
+    // 这样长下载过程中进度条持续可见地前进，不再卡在 5%/单值。
     let app_p = app.clone();
     let stdout = child.stdout.take().unwrap();
     let reader = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut saw_reify = false;
+        let mut progress = 0.1f64;
         for line in reader.lines().map_while(Result::ok) {
             if line.contains("reify") {
                 saw_reify = true;
             }
-            // 进入 reify=下载/链接阶段后，进度从 0.1 爬到 0.9（粗略，按行数不可靠，仅作体感）
             if saw_reify {
-                emit_progress(&app_p, "downloading-deps", 0.5);
-            } else {
-                emit_progress(&app_p, "resolving-deps", 0.2);
+                // 下载/链接阶段：随每个包缓步前进（封顶 0.9，给 finalizing 留余量）
+                progress = (progress + 0.01).min(0.9);
+                emit_progress(&app_p, "downloading-deps", progress);
+            } else if progress < 0.2 {
+                // 解析阶段：缓慢爬到 0.2，避免完全静止
+                progress = (progress + 0.005).min(0.2);
+                emit_progress(&app_p, "resolving-deps", progress);
             }
         }
     });
 
     // 同时排空 stderr，避免 npm 写满管道缓冲区导致进程阻塞挂死（经典 pipe deadlock）。
+    // 捕获内容用于失败时透出真实错误（而非笼统的「退出码非零」）。
     let stderr = child.stderr.take().unwrap();
-    let err_reader = std::thread::spawn(move || {
+    let err_reader = std::thread::spawn(move || -> String {
         let mut r = BufReader::new(stderr);
         let mut buf = String::new();
         let _ = r.read_to_string(&mut buf);
+        buf
     });
 
     // 用 channel + recv_timeout 实现整体超时，而非无限等待 child.wait()
@@ -582,29 +679,36 @@ fn run_npm_install(
     match rx.recv_timeout(std::time::Duration::from_secs(DSH_INSTALL_TIMEOUT)) {
         Ok(Some(status)) => {
             let _ = reader.join();
-            let _ = err_reader.join();
+            let err = err_reader.join().unwrap_or_default();
             let _ = waiter.join();
             if status.success() {
                 Ok(())
             } else {
-                Err(format!("npm 退出码非零 (registry={})", registry))
+                // 透出 npm 真实报错（取 stderr 末段），而非笼统的「退出码非零」。
+                Err(format!(
+                    "npm 安装失败 (registry={}): {}",
+                    registry,
+                    last_lines(&err, 1500)
+                ))
             }
         }
         Ok(None) => {
             let _ = reader.join();
-            let _ = err_reader.join();
+            let err = err_reader.join().unwrap_or_default();
             let _ = waiter.join();
-            Err(format!("无法等待 npm 进程 (registry={})", registry))
+            Err(format!("无法等待 npm 进程 (registry={}): {}", registry, last_lines(&err, 800)))
         }
         Err(_) => {
             // 超时或 channel 断开：杀整棵 npm 进程树（含其派生子进程），避免残留 + 真正终止挂死
             kill_process_tree(pid);
             let _ = reader.join();
-            let _ = err_reader.join();
+            let err = err_reader.join().unwrap_or_default();
             let _ = waiter.join();
             Err(format!(
-                "npm install 超时（>{}s，registry={}）",
-                DSH_INSTALL_TIMEOUT, registry
+                "npm install 超时（>{}s，registry={}）: {}",
+                DSH_INSTALL_TIMEOUT,
+                registry,
+                last_lines(&err, 800)
             ))
         }
     }
@@ -639,13 +743,13 @@ fn kill_process_tree(pid: u32) {
 /// 兜底：把 dsh 核心包内部嵌套的 `@deepseek-ai/*` 软链/复制到顶层（仅当顶层缺失时），
 /// 让 `@iyam` 插件能找到。失败仅告警，不阻断启动（部分版本布局不同属正常）。
 fn hoist_nested_dsh_deps(home: &PathBuf) {
-    let nested = home
-        .join("node_modules")
+    let nm = crate::installer::dsh_node_modules(home);
+    let nested = nm
         .join("@deepseek-ai")
         .join("dsh")
         .join("node_modules")
         .join("@deepseek-ai");
-    let top = home.join("node_modules").join("@deepseek-ai");
+    let top = nm.join("@deepseek-ai");
     if !nested.is_dir() {
         return;
     }

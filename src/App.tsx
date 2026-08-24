@@ -15,6 +15,7 @@ interface InstallState {
   error?: string;
   progress?: number;
   exiting?: boolean;
+  kind?: "install" | "launch";
 }
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"]);
@@ -130,6 +131,7 @@ export default function App() {
           status: "error",
           message: String(err),
           error: String(err),
+          kind: "install",
         });
         return;
       }
@@ -145,6 +147,7 @@ export default function App() {
           status: "error",
           message: "DSH 启动失败",
           error: String(err),
+          kind: "launch",
         });
       }
     }
@@ -330,13 +333,14 @@ export default function App() {
   }
 
   if (state.status === "error") {
+    const heading = state.kind === "install" ? "安装失败" : "启动失败";
     return (
       <div className="app-shell">
         <TitleBar rightOffset={preview ? dockWidth : 0} />
         <div className="app error">
           <div className="error-card">
             <div className="error-icon">⚠</div>
-            <h2>启动失败</h2>
+            <h2>{heading}</h2>
             <p className="error-msg">{state.error || state.message}</p>
             <button onClick={() => window.location.reload()}>重试</button>
             <p className="error-hint">

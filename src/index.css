@@ -80,6 +80,13 @@ body,
   pointer-events: none;
 }
 
+/* 跨平台下拉箭头（内联 SVG，不依赖系统字体） */
+.tb-chevron {
+  display: block;
+  color: inherit;
+  pointer-events: none;
+}
+
 /* ── 窗口控制按钮 hover ──
     按 Windows 规范（WinUI 3 AppWindowTitleBar 默认值）：
     - 最小化/最大化：悬停/按下为中性淡灰覆盖层，图标颜色不变（与原生一致）

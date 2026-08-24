@@ -29,7 +29,7 @@ pub fn kill_dsh_on_exit() {
         None
     };
     if let Some(mut child) = taken {
-        let pid = child.id();
+        let _pid = child.id();
         #[cfg(windows)]
         {
             taskkill_tree(pid);

@@ -12,6 +12,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use regex::Regex;
 use tauri::Emitter;
+#[cfg(windows)]
 use tauri::Manager;
 
 use crate::installer::{detect_dsh_cli, dsh_home, get_install_status, refresh_dsh_core, InstallStatus};
@@ -44,8 +45,11 @@ fn dsh_supports_no_open(cli: &PathBuf, home: &PathBuf) -> bool {
 }
 
 /// 真正执行一次 `--no-open` 能力探测。
+/// `cli` 为真实 `bin.js` 路径，直接用托管 node 跑（跨平台一致，不依赖软链/shebang）。
 fn probe_no_open(cli: &PathBuf, home: &PathBuf) -> bool {
-    let mut cmd = Command::new(cli);
+    let node = crate::installer::managed_node(home);
+    let mut cmd = Command::new(&node);
+    cmd.arg(cli);
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
         .arg("web")
         .arg("--no-open")
@@ -107,18 +111,13 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         log::warn!("refresh dsh core failed: {}", e);
     }
 
-    // 启动 dsh CLI（系统 dsh 或 ~/.dsh/bin/dsh）
+    // 启动 dsh CLI：`cli` 已是真实 `bin.js` 路径（托管态用托管 node 跑，系统态用 OS node 跑）。
     let cli = detect_dsh_cli().ok_or("未找到 dsh 命令，请检查安装或网络后重试。")?;
-    let bin_js = crate::installer::dsh_core_dir(&home).join("lib").join("bin.js");
-    if !bin_js.exists() {
-        return Err(format!("DSH 入口文件不存在: {:?}", bin_js));
-    }
 
     // 内置插件刷新（幂等）必须在"已运行早退"之前执行，否则 DSH 已在运行时新插件永远装不上。
     // needs_dsh_restart：文件查看插件是最近新增的内置插件；刷新前它不在 DSH_HOME，
     // 说明运行中的 DSH 早于当前构建（未加载我们的插件集）→ 下方检测到已运行时会杀掉重启。
-    let needs_dsh_restart = !home
-        .join("node_modules")
+    let needs_dsh_restart = !crate::installer::dsh_node_modules(&home)
         .join("@iyam")
         .join("dsh-file-handler")
         .join("client.js")
@@ -168,7 +167,20 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     let no_open = dsh_supports_no_open(&cli, &home);
     log::info!("DSH --no-open supported: {}", no_open);
 
-    let mut cmd = Command::new(&cli);
+    // 跨平台统一：用 node 直接跑 `bin.js`，不依赖 `bin/dsh` 软链 + shebang
+    // （部分镜像 tarball 的 bin.js 是坏壳子，靠软链必然崩；且托管 node 不在系统 PATH）。
+    // 托管态 clI 在 ~/.dsh 下 → 用托管 node；系统态 → 用 OS `node`。
+    let managed = cli.starts_with(&home);
+    let mut cmd = if managed {
+        let node = crate::installer::managed_node(&home);
+        Command::new(&node)
+    } else {
+        Command::new("node")
+    };
+    cmd.arg(&cli);
+    if let Some(node_path) = crate::installer::prepend_managed_node_path(&home) {
+        cmd.env("PATH", node_path);
+    }
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
        .arg("web");
     if no_open {

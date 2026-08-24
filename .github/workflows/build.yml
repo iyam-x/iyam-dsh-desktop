@@ -1,6 +1,10 @@
 name: Build
 
-# 推送 v* 标签时，自动在各平台构建安装包并上传到草稿 Release 的 Assets。
+# 推送 v* 标签时，自动在各常见桌面平台构建安装包，并上传为 Release Assets。
+# 覆盖平台：
+#   - macOS   (Apple Silicon, aarch64) → .dmg
+#   - Windows (x64)                    → .exe (NSIS)
+#   - Linux   (x64)                    → .AppImage + .deb
 on:
   push:
     tags:
@@ -16,13 +20,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS：仅出 Apple Silicon (aarch64)。GitHub 已下架 macos-13（最后的 Intel
-          # 运行器），且无托管的 x64 macOS 运行器；本项目内置的 Node/DSH 运行时按架构
-          # 打包，交叉编译 x64 需自托管 Intel 机器或完整 x64 交叉打包，故暂不出 x64。
-          # Linux 不出 CI 安装包，用户自行从源码构建。
+          # macOS：仅出 Apple Silicon。GitHub 已下架 macos-13（最后的 Intel 运行器），
+          # 且无托管的 x64 macOS 运行器；交叉编译 x64 需自托管 Intel 机器，故暂不出 x64。
           - platform: macos-14
             args: "--target aarch64-apple-darwin"
           - platform: windows-latest
+            args: ""
+          - platform: ubuntu-22.04
             args: ""
 
     runs-on: ${{ matrix.platform }}
@@ -35,10 +39,10 @@ jobs:
         with:
           node-version: 22
 
-      # 不用 pnpm/action-setup（指定大版本范围且无 packageManager 字段时会触发
-      # `pnpm store path` 失败）；直接用 npm 安装 pnpm，简单可靠。
-      - name: Install pnpm
-        run: npm install -g pnpm@9
+      # 使用 npm（与本地工具链一致）：beforeBuildCommand 为 `npm run build`，
+      # 前端依赖用 npm 安装；避免 pnpm 在无 packageManager 字段时的环境不一致问题。
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -48,8 +52,17 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+      # Linux 需要 Tauri 的 WebView 系统依赖才能编译/打包。
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev
 
       # 拉取内置 DSH 内核（@deepseek-ai/dsh，含原生模块）与本平台 Node 运行时。
       # 必须在 tauri build 之前执行；各自下载当前平台产物。
@@ -65,6 +78,8 @@ jobs:
           # 可选：填入以下 Secret 即可自动签名/公证 macOS 产物。留空则产出未签名包。
           # APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
           # APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+          # Windows 可选签名 Secret：
+          # WINDOWS_CERTIFICATE / WINDOWS_CERTIFICATE_PASSWORD
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "iyam-dsh-desktop ${{ github.ref_name }}"
