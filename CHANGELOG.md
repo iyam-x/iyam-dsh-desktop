@@ -4,6 +4,20 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 变更
+
+- **运行时改为按需下载（不再内置）**：DSH 内核与 Node 运行时不再打包进安装包，改为首次启动经 npmmirror → npm 官方镜像回退下载并部署到 `~/.dsh/`（全局布局）。安装包体积从约 460MB 降至约 14MB；首次启动需联网（约 1~2 分钟），之后秒级启动。
+- **DSH 升级改为"备货"机制**：「检查更新」发现新版时后台装到 `~/.dsh/.staging`，下次启动提升（apply）到正式目录，失败自动回滚到上一可用版本；版本未变不重新下载。
+- **安装目录变更**：由 `~/.iyam-dsh/` 改为与用户自行 `npm i -g` 一致的 `~/.dsh/`，便于复用已装标准插件；PID / 端口文件重命名为 `.iyam-dsh.pid` / `.iyam-dsh.port`。
+
+### 修复
+
+- **启动闪 cmd 窗口**：`detect_dsh_cli` 的 `where` 探测与 npm 安装子进程补 `CREATE_NO_WINDOW`，消除初始化时多个控制台窗口闪烁。
+- **退出闪「加载失败」**：应用退出时先隐藏主窗口 / iframe 再杀 DSH 进程，并调整 `dsh-app-exiting` 事件顺序（先于 kill 发出），避免后端被杀瞬间 iframe 闪现 DSH 的「加载失败」错误页。
+- **启动变慢 / 像反复初始化**：`--no-open` 能力探测结果缓存到 `~/.dsh/.no-open-supported`，后续启动跳过这次约 3s 的 node 探测，加快启动。
+
 ## [0.1.0] - 2026-08-20
 
 ### 修复

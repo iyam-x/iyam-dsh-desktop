@@ -14,6 +14,7 @@ interface InstallState {
   port?: number;
   error?: string;
   progress?: number;
+  exiting?: boolean;
 }
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"]);
@@ -59,6 +60,8 @@ export default function App() {
   const [dockWidth, setDockWidth] = useState<number>(loadDockWidth);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const closePreview = () => setPreview(null);
+  // 标记应用正在退出（用户主动退出），用于抑制退出时 DSH 进程被杀触发的崩溃卡片一闪。
+  const exitingRef = useRef(false);
 
   // 打开 DSH 转发来的文件预览：按扩展名分图片/音视频(读二进制)与文本/代码(读全文)。
   async function openPreview(path: string) {
@@ -176,8 +179,16 @@ export default function App() {
       });
     }).catch(() => {});
 
-    // DSH 进程意外退出时通知前端切换到崩溃状态
+    // 应用主动退出：Rust 侧先杀 DSH 进程再关窗，标记 exiting 以抑制下方崩溃卡片闪现，
+    // 并隐藏 iframe 避免看到 DSH 后端被杀时的「加载失败」错误页。
+    listen<void>("dsh-app-exiting", () => {
+      exitingRef.current = true;
+      setState((prev) => ({ ...prev, exiting: true }));
+    }).catch(() => {});
+
+    // DSH 进程意外退出时通知前端切换到崩溃状态（主动退出时已由 exiting 标记跳过）。
     listen<void>("dsh-process-exit", () => {
+      if (exitingRef.current) return;
       setState((prev) => {
         if (prev.status === "ready") {
           return { ...prev, status: "crashed" };
@@ -383,6 +394,7 @@ export default function App() {
           title="DeepSeek Harness"
           className="webview"
           ref={iframeRef}
+          style={state.exiting ? { display: "none" } : undefined}
         />
         {preview && (
           <PreviewDock

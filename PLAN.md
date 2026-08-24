@@ -4,13 +4,11 @@
 
 将 `@deepseek-ai/dsh` 封装为跨平台原生桌面应用。用户无需任何 Node.js/npm 知识，双击图标即可使用完整 DSH 功能。
 
-- **App 本体**：~14MB（Tauri 壳 + Rust 二进制 + 前端）
-- **内置 DSH**：~333MB（完整 `@deepseek-ai/dsh` 包，打包进 app Resources）
-- **内置 Node**：~116MB/平台（Node 24 LTS，随 app bundle 分发，零系统依赖）
-- **总计**：~460MB（一次打包，永久使用，无需网络、无需系统安装 Node.js）
-- **首次启动**：从内置资源复制到 `~/.iyam-dsh/`，瞬间完成
-- **后续启动**：直接复用本地安装，秒级启动
-- **内核不变**：`@deepseek-ai/dsh` 源码零修改，通过 App 内「检查更新」独立升级
+- **App 本体**：~14MB（Tauri 壳 + Rust 二进制 + 前端 + 内置体验插件）
+- **DSH 内核 / Node 运行时**：**不内置**，首次启动按需下载到 `~/.dsh/`（Node 24 LTS 经镜像下载；`@deepseek-ai/dsh` 用托管 Node 的 npm 全局安装，约 1~2 分钟，需联网）
+- **首次启动**：下载 Node + 全局安装 dsh 到 `~/.dsh/`（镜像回退，约 1~2 分钟）
+- **后续启动**：直接复用 `~/.dsh/` 本地安装，秒级启动，不再下载
+- **内核升级**：App 内「检查更新」后台备货（`.staging`）→ 下次启动提升，失败回滚；版本未变不重新下载
 
 ---
 
@@ -21,7 +19,7 @@
 | 壳框架 | **Tauri v2** | ~15MB 包体，复用系统 WebView，原生托盘/菜单 |
 | 前端 | TypeScript + React + Vite | 快速开发，与 DSH 生态一致 |
 | 后端 | Rust (Tauri) | 进程管理稳定，交叉编译友好 |
-| Node 运行时 | **内置 Node 24 LTS**（`scripts/fetch-node.mjs` 按平台下载） | 零系统依赖，满足原生模块 ABI（node-pty napi-v9 / sharp ≥20.9） |
+| Node 运行时 | **托管 Node 24 LTS**（首次启动经 npmmirror → npm 官方镜像下载，解压到 `~/.dsh/node/`） | 零系统依赖，满足原生模块 ABI（node-pty napi-v9 / sharp ≥20.9） |
 | DSH 调用 | Rust 直接 spawn `node lib/bin.js web` | 不经过 shell 脚本，Windows 天然支持 |
 | UI 集成 | **WebviewWindow 直连** | 无 iframe 边框，完整原生窗口体验 |
 | 分发 | macOS `.app/.dmg`，Windows `.exe`，Linux `.AppImage` | |
@@ -34,27 +32,27 @@
 iyam-dsh-desktop/
 ├── package.json                    # Tauri v2 + Vite + React 项目
 ├── scripts/
-│   └── fetch-node.mjs              # 按平台下载内置 Node 运行时
+│   └── fetch-dsh.mjs               # 调试用：本地预拉取 DSH 到 bundle 资源（不影响正式分发）
 ├── src/
 │   ├── main.tsx                    # React 入口
-│   ├── App.tsx                     # 主页面（Loading / Error / Ready 三状态）
+│   ├── App.tsx                     # 主页面（Installing / Loading / Ready / Error / Crashed）
 │   └── index.css                   # 全局样式
 ├── src-tauri/
 │   ├── bin/
-│   │   ├── dsh-package/            # 内置 DSH 完整包（333MB）
-│   │   └── node/<平台>/            # 内置 Node 运行时（~116MB/平台）
+│   │   └── dsh-{shell,rtui-ui,file-handler}/  # 内置体验插件（随壳分发）
 │   ├── Cargo.toml                  # Rust 依赖
 │   ├── src/
 │   │   ├── main.rs                 # Tauri 入口：tray + menu + auto-start
-│   │   ├── process.rs              # 用内置 node 管理 DSH 进程生命周期
-│   │   ├── installer.rs            # 检测 + 部署内置 DSH 到 ~/.iyam-dsh/
+│   │   ├── process.rs              # 用托管 node 管理 DSH 进程生命周期
+│   │   ├── installer.rs            # 检测 + 按需下载部署 DSH 到 ~/.dsh/
+│   │   ├── downloader.rs           # Node 镜像下载 + npm 全局安装 dsh + 备货升级
 │   │   └── updater.rs              # 版本检查与提示更新
 │   ├── tauri.conf.json             # 窗口配置、bundle、icon
 │   ├── capabilities/               # 权限策略
 │   │   └── default.capabilities.json
 │   ├── capabilities/installer.capabilities.json
 │   ├── icons/                      # 各平台图标
-│   └── build.rs                    # 构建脚本（打包 dsh-package + node 进 Resources）
+│   └── build.rs                    # 构建脚本（打包内置插件进 Resources）
 └── PLAN.md
 ```
 
@@ -62,32 +60,34 @@ iyam-dsh-desktop/
 
 ## 四、核心模块设计
 
-### 4.1 `installer.rs` — 安装器
+### 4.1 `installer.rs` / `downloader.rs` — 安装器
 
-**职责**：确保 `~/.iyam-dsh/` 下有可用的 dsh 安装（零网络、零系统依赖）
+**职责**：确保 `~/.dsh/` 下有可用的 dsh 安装（首次启动联网下载，之后复用）
 
 ```rust
-// 1. DSH_HOME = dirs::home_dir() + "/.iyam-dsh"
-// 2. 检查 <DSH_HOME>/bin/dsh(.cmd) 是否存在且可执行
-//    ├─ 存在且有效 → Ok(true) 无需安装
+// 1. DSH_HOME = $DSH_HOME 或 dirs::home_dir() + "/.dsh"（与用户 npm i -g 一致）
+// 2. 检查 <DSH_HOME>/bin/dsh(.cmd) 是否存在且可执行（detect_dsh_cli + lib/bin.js）
+//    ├─ 存在且有效 → Installed，无需安装
 //    └─ 不存在 → 触发安装流程
-// 3. 安装流程（纯本地复制，无网络）：
-//    a. 定位内置资源：app.path().resource_dir() → bin/dsh-package + bin/node/<平台>/node
-//    b. 复制内置 dsh-package 到 <DSH_HOME>/
-//    c. 生成 bin/dsh（unix sh）或 bin/dsh.cmd（windows），指向内置 node 绝对路径
-// 4. 安装失败 → 返回 Error("内置资源不完整，请重新安装应用")
+// 3. 安装流程（首次启动联网）：
+//    a. ensure_node：~/.dsh/node/<平台>/node 不存在则从 npmmirror → npm 官方镜像下载归档并解压
+//    b. 用托管 node 的 npm 以全局布局（-g --prefix ~/.dsh）安装 @deepseek-ai/dsh
+//    c. 生成 bin/dsh（unix sh）或 bin/dsh.cmd（windows），指向托管 node 绝对路径
+//    d. 写 .iyam-managed 标记（app 托管，才由 app 升级）
+// 4. 安装失败 → 返回 Error（网络/镜像不可达时提示检查网络）
 ```
 
 **关键实现细节**：
-- 内置 Node 由 `scripts/fetch-node.mjs` 下载，构建期随 bundle 分发
-- `node_target()` 用编译期 cfg 映射当前平台 → 资源目录名
-- 不读取系统 node、不执行 npm install
+- Node 归档与 dsh 的 npm registry 均按「npmmirror 优先 → npm 官方兜底」顺序回退
+- dsh 用全局 `-g --prefix` 安装（hoisted 布局，~1min；局部 --prefix 解析极慢被弃用）
+- Windows 解压用 `C:\Windows\System32\tar.exe`；npm 安装子进程加 `CREATE_NO_WINDOW` 避免闪窗
+- 不读取系统 node、除非用户在 PATH 上自行安装了 dsh 并经探测选用
 
 ### 4.2 `process.rs` — 进程管理
 
 ```rust
 // spawn_dsh_web(dsh_home: &Path) -> Result<(Child, u16), Error>
-//   1. 定位内置 node：app.path().resource_dir() → bin/node/<平台>/node(.exe)
+//   1. 定位托管 node：~/.dsh/node/<平台>/node(.exe)（首次启动下载，非内置）
 //   2. 构造命令: <node> <dsh_home>/lib/bin.js web --port 0
 //      （不经 shell，无 wrapper，Windows 天然支持）
 //   3. 设置 env:
@@ -107,21 +107,22 @@ iyam-dsh-desktop/
 ```
 
 **关键实现细节**：
-- 启动前先 `get_install_status`，未安装才执行安装，避免每次启动重复拷贝 333MB
-- PID 文件 `~/.iyam-dsh/dsh.pid` + 端口文件 `dsh.port`，二次启动复用
+- 启动前先 `get_install_status`，未安装才执行安装（首次启动下载，之后复用）
+- PID 文件 `~/.dsh/.iyam-dsh.pid` + 端口文件 `~/.dsh/.iyam-dsh.port`，二次启动复用
+- `--no-open` 能力探测结果缓存到 `~/.dsh/.no-open-supported`，避免每次启动重复 ~3s 探测
 
-### 4.3 `updater.rs` — 版本检查
+### 4.3 `updater.rs` — 版本检查与备货
 
 ```rust
-// check_for_update(installed_version: &str) -> Result<Option<String>, Error>
-//   1. GET https://registry.npmjs.org/@deepseek-ai/dsh/latest
-//   2. 解析 JSON 取 `dist-tags.latest`
-//   3. 比较 semver: 远端 > 本地 → Some(新版本号)
-//   4. 否则 → None
+// check_for_update() -> UpdateInfo { installed, latest, has_update, managed }
+//   1. 读 ~/.dsh/package.json 的 version 作为 installed
+//   2. GET <registry>/@deepseek-ai/dsh/latest（npmmirror → npm 官方回退）取 latest
+//   3. semver 比较：latest > installed → has_update
+//   4. 托管态且有新版本 → 24h 节流后后台备货（stage_update）
 
-// prompt_update(new_version: &str) -> bool
-//   弹系统对话框询问用户是否更新
-//   用户确认 → 重新运行 installer（下载新版本）→ 重启 App
+// trigger_dsh_update()  # 手动「检查并更新」：立即 stage_update，下次启动生效
+// stage_update()        # 装新版本到 ~/.dsh/.staging，写 .update.json(status=ready)
+// apply_staged_if_ready()  # 启动早期：staged > 当前 → 提升到正式目录（备份+回滚）
 ```
 
 ### 4.4 `main.rs` — Tauri 入口
@@ -187,7 +188,7 @@ App.tsx 三状态流转：
     "active": true,
     "targets": "all",
     "icon": ["icons/32x32.png", "icons/128x128.png", ...],
-    "resources": ["bin/dsh-package", "bin/node"],
+    "resources": ["bin/dsh-shell-plugin", "bin/dsh-rtui-ui", "bin/dsh-file-handler"],
     "macOS": {
       "entitlements": null,
       "frameworks": [],
@@ -230,10 +231,9 @@ pnpm tauri build
 
 #### 0. 发布前检查清单
 
-- [ ] `pnpm fetch:node --target <当前平台>` 已执行，`src-tauri/bin/node/<平台>/node` 存在
-- [ ] 内置 DSH 包 `src-tauri/bin/dsh-package/` 存在（.gitignore 排除，需手动放置）
-- [ ] `pnpm tauri dev` 完整流程通过（安装 → 启动 → DSH Web UI 可访问）
-- [ ] `~/.iyam-dsh` 有测试产生的配置时，确认不影响发布验证（可临时 `rm -rf ~/.iyam-dsh`）
+- [ ] 安装包不再内置 DSH/Node（resources 仅含三个内置插件）
+- [ ] `pnpm tauri dev` 完整流程通过（首次启动下载 → 启动 → DSH Web UI 可访问）
+- [ ] `~/.dsh` 有测试产生的配置时，确认不影响发布验证（可临时 `rm -rf ~/.dsh`）
 
 #### 1. 版本号统一（三处保持一致）
 
@@ -308,8 +308,8 @@ pnpm tauri build
 #### 7. 发布后验证
 
 - [ ] 从 Releases 下载各平台安装包，在干净环境安装
-- [ ] 首次启动：断网安装验证（内置部署、无需网络）
-- [ ] 验证 `~/.iyam-dsh/bin/dsh --version` 可手动执行
+- [ ] 首次启动：联网安装验证（下载 Node + dsh 到 `~/.dsh/`，进度透出）；二次启动断网复用
+- [ ] 验证 `~/.dsh/bin/dsh --version` 可手动执行
 - [ ] README「安装包下载」表格中的文件名与实际产物一致
 
 ### CI/CD（可选）
@@ -324,9 +324,9 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 | `dsh plugin add <pkg>` | 完全可用（DSH 进程内有 terminal tool） |
 | `dsh plugin remove <pkg>` | 完全可用 |
 | `dsh --profile web --help` | App 固定使用 web profile |
-| `DSH_HOME` 环境变量 | App 固定为 `~/.iyam-dsh/` |
+| `DSH_HOME` 环境变量 | App 默认 `~/.dsh/`（与用户 npm i -g 一致），可被 `$DSH_HOME` 覆盖 |
 | dsh 内核升级 | App 菜单「检查更新」或手动 `npm update -g @deepseek-ai/dsh` |
-| Agent Presets | 读取 `~/.iyam-dsh/.agent-presets/`，完整保留 |
+| Agent Presets | 读取 `~/.dsh/.agent-presets/`，完整保留 |
 | Cordis 插件系统 | 完整保留，无感知 |
 
 ---
@@ -334,8 +334,7 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 ## 九、实施步骤（建议顺序）
 
 1. **创建 Tauri 项目脚手架**（`pnpm create tauri-app`）
-2. **下载内置 Node**（`scripts/fetch-node.mjs` + `pnpm fetch:node`）
-3. **实现 `installer.rs`**：内置资源定位 + 本地复制 + 跨平台启动脚本
+2. **实现 `downloader.rs` + `installer.rs`**：Node 镜像下载 + npm 全局安装 dsh 到 `~/.dsh/` + 跨平台启动脚本
 4. **实现 `process.rs`**：内置 node 直启 + 端口监听 + kill
 5. **实现 `main.rs`**：Tauri 入口 + 托盘 + 命令注册
 6. **实现前端 `App.tsx`**：状态机 UI
@@ -349,11 +348,11 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 
 | 风险 | 影响 | 应对 |
 |------|------|------|
-| 内置 Node 与 DSH 原生模块 ABI 不匹配 | 无法加载 node-pty/sharp | 选定 LTS 后先验证原生模块加载；升级 Node 前跑兼容性测试 |
+| 托管 Node 与 DSH 原生模块 ABI 不匹配 | 无法加载 node-pty/sharp | 选定 LTS 后先验证原生模块加载；升级 Node 前跑兼容性测试 |
 | macOS Gatekeeper 拦截未签名 App | 无法打开 | 发布时进行代码签名；提供公证指引 |
 | Windows WebView2 版本过旧 | 渲染异常 | 启动时检测 WebView2 版本，不足则引导安装 |
-| 包体过大（~460MB） | 分发/下载慢 | 单平台构建，仅内置当前平台 node |
-| DSH 新版本的 breaking change | 兼容性问题 | 保持对最新版 dsh 的测试覆盖 |
+| 首次启动需联网下载（~1~2 分钟） | 弱网/离线首次启动慢 | 镜像回退（npmmirror → npm 官方）；安装进度透出，15min 整体超时兜底 |
+| DSH 新版本的 breaking change | 兼容性问题 | 保持对最新版 dsh 的测试覆盖；备货失败自动回滚 |
 
 ---
 

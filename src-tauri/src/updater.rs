@@ -39,7 +39,10 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateInfo, Strin
 pub async fn trigger_dsh_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     let latest = crate::downloader::latest_dsh_version().await?;
     let installed = get_installed_version().await?;
-    if crate::installer::is_managed() {
+    // 版本未变则不下备货、不重新下载（仅返回当前状态，前端据此提示"已是最新版本"）。
+    let a = latest.trim_start_matches('v');
+    let b = installed.trim_start_matches('v');
+    if crate::installer::is_managed() && a != b {
         crate::downloader::stage_update(&app, &dsh_home(), &latest)
             .await
             .map_err(|e| format!("备货失败: {}", e))?;

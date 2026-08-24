@@ -145,12 +145,13 @@ fn main() {
     // 应用真正退出前清理 DSH 子进程，防止 node 残留
     app.run(|app_handle, event| {
         if let RunEvent::ExitRequested { .. } = event {
+            // 先通知前端「正在退出」：前端据此抑制 DSH 进程退出触发的崩溃卡片，
+            // 并在窗口关闭前隐藏 iframe，避免看到 DSH 后端被杀时的「加载失败」闪现。
+            let _ = app_handle.emit("dsh-app-exiting", ());
             process_state::kill_dsh_on_exit();
             let home = installer::dsh_home();
             let _ = std::fs::remove_file(home.join(".iyam-dsh.pid"));
             let _ = std::fs::remove_file(home.join(".iyam-dsh.port"));
-            // 通知前端应用正在退出（可选）
-            let _ = app_handle.emit("dsh-app-exiting", ());
         }
     });
 }
@@ -272,8 +273,11 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), String> {
                     // 此前放在 async_runtime 工作线程里调用，exit 信号未被主线程
                     // 事件循环处理，表现为点击「退出」无反应（而「打开 DSH」在主线程
                     // 同步执行，正常）。DSH 清理由 app.run 的 ExitRequested 处理器完成。
-                    // 这里先显式杀 DSH（守护线程独占 child 句柄后，exit 回调里的清理
-                    // 拿不到句柄，必须靠 dsh.pid 兜底杀 node），再退出。
+                    // 先隐藏主窗口：避免 node 被杀瞬间 iframe 闪出 DSH 的「加载失败」，
+                    // 再杀 DSH 并退出。
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.hide();
+                    }
                     process_state::kill_dsh_on_exit();
                     app.clone().exit(0);
                 }

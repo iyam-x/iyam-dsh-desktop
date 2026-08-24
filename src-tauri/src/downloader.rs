@@ -15,6 +15,12 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -98,6 +104,16 @@ pub async fn bootstrap_dsh(app: &AppHandle, home: &PathBuf) -> Result<PathBuf, S
 
 /// 升级备货：以全局方式把目标版本 dsh 装到 `~/.dsh/.staging`（全局布局），写 `.update.json`。
 pub async fn stage_update(app: &AppHandle, home: &PathBuf, target_version: &str) -> Result<(), String> {
+    // 版本未变则无需重新下载/安装：直接跳过，避免每次打开都重跑 npm install。
+    // 注意 target_version 可能带 `v` 前缀，与 package.json 的 version 统一去 `v` 比较。
+    if let Some(cur) = package_version(home) {
+        let a = target_version.trim_start_matches('v');
+        let b = cur.trim_start_matches('v');
+        if a == b {
+            log::info!("目标版本 {} 已安装，跳过备货", target_version);
+            return Ok(());
+        }
+    }
     let node = ensure_node(app, home).await?;
     emit_progress(app, "staging-download", 0.1);
     let staging = home.join(".staging");
@@ -507,6 +523,13 @@ fn run_npm_install(
         .arg(registry)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Windows：node/npm 是控制台程序，默认会弹一个可见的 cmd 窗口。加 CREATE_NO_WINDOW
+    // 让其后台静默运行（仅在真正下载/安装 dsh 时发生，避免初始化时闪窗）。
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let mut child = cmd.spawn().map_err(|e| format!("启动 npm 失败: {}", e))?;
     let pid = child.id();

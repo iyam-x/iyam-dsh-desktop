@@ -24,7 +24,27 @@ use crate::process_state::DSH_CHILD;
 /// 但"哪个版本开始支持"不可靠，故不靠版本号硬猜，而是**实际拉起一次**观察：
 /// 若进程因 unknown option 立即退出 → 不支持；若 3s 内仍在运行（说明参数被接受、
 /// server 已起）→ 支持。探测进程会被杀掉，不影响正式启动。
+///
+/// 探测结果缓存到 `<home>/.no-open-supported`（"1"/"0"），后续启动直接读取，
+/// 跳过这次会 spawn 一个 node 进程、耗时约 3s 的探测，加快启动、减少闪窗。
 fn dsh_supports_no_open(cli: &PathBuf, home: &PathBuf) -> bool {
+    let cache = home.join(".no-open-supported");
+    if let Ok(s) = fs::read_to_string(&cache) {
+        if s.trim() == "1" {
+            return true;
+        }
+        if s.trim() == "0" {
+            return false;
+        }
+    }
+
+    let supported = probe_no_open(cli, home);
+    let _ = fs::write(&cache, if supported { "1" } else { "0" });
+    supported
+}
+
+/// 真正执行一次 `--no-open` 能力探测。
+fn probe_no_open(cli: &PathBuf, home: &PathBuf) -> bool {
     let mut cmd = Command::new(cli);
     cmd.env("DSH_HOME", home.to_string_lossy().to_string())
         .arg("web")

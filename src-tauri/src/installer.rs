@@ -81,7 +81,11 @@ pub(crate) fn dsh_home() -> PathBuf {
 /// 在 PATH 上解析命令的完整路径（Windows 用 `where`，类 Unix 用 `which`）。
 fn resolve_in_path(name: &str) -> Option<PathBuf> {
     let out = if cfg!(windows) {
-        Command::new("where").arg(name).output().ok()?
+        let mut c = Command::new("where");
+        c.arg(name);
+        // 隐藏控制台窗口：否则每次启动探测 dsh 时都会闪一个 cmd 窗。
+        c.creation_flags(0x0800_0000);
+        c.output().ok()?
     } else {
         Command::new("which").arg(name).output().ok()?
     };
