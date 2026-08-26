@@ -450,3 +450,10 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 - **修复**：`TO` 去掉 koffi 依赖，仅做数值范围校验后把 `process.env.DSH_DIALOG_OWNER_HWND` 直接作为 owner 传给 `Show`（HWND 是有效窗口句柄即可，成为主窗口 owned window → 不占任务栏）。并新增 `OLD_KOFFI` 还原分支，使已部署的破损补丁也能被纠正。
 - **经验**：给 DSH 第三方 `worker.cjs` 打补丁时，注入的代码必须不依赖该 worker 自身未 import 的模块（koffi 等）——只依赖全局 `process` / 传入的 `method`/`dialog` 等。
 
+### 13. 目录选择器 owner 补丁只打了顶层副本，嵌套副本仍弹 node 图标（2026-08-26）
+
+- **症状**：选工作目录/工作区时任务栏仍多出 node 图标（#12 的补丁"已生效"却没生效）。
+- **根因**：npm 把 `dsh-host-directory-picker-native` 同时装在顶层 `node_modules/@deepseek-ai/...` 与嵌套 `node_modules/dsh/node_modules/@deepseek-ai/...`。Node 解析依赖就近取嵌套副本，但 `ensure_picker_owner_patch` 只改了顶层那一份；运行时加载的嵌套副本仍是 `Show(null)` → 对话框无 owner → 单独占任务栏按钮。
+- **修复**：`ensure_picker_owner_patch` 改为递归遍历 `DSH_HOME/node_modules` 下**所有** `dsh-host-directory-picker-native/lib/worker.cjs` 一并打补丁（幂等、跳符号链接防环、限深 24）。
+- **经验**：给 DSH 第三方文件打补丁前，先 `grep`/解析确认"运行时真正加载的是哪一份"——存在 npm 嵌套副本时，只改一处会以为生效实则没改到。
+

@@ -24,6 +24,18 @@
 
 - **插件市场改为询问安装**：启动完成后若 `dshmarket` 尚未安装，弹窗询问用户是否安装；点击「安装」才经 `dsh plugin --profile web add dshmarket` 安装，点击「暂不安装」则不安装、不影响功能。不再首启强制联网安装，无网络/不需要时不再拖慢启动。
 
+## [0.2.1] - 2026-08-26
+
+### 修复
+
+- **目录选择对话框任务栏多出 node 图标**：`ensure_picker_owner_patch` 此前只改了顶层 `worker.cjs`，漏掉 npm 嵌套副本（运行时实际加载的那一份），导致对话框无 owner、单独占任务栏按钮。改为递归遍历 `DSH_HOME/node_modules` 下所有 `dsh-host-directory-picker-native/lib/worker.cjs` 一并打补丁，对话框以主窗口为 owner，不再弹 node 图标。
+
+## [0.2.2] - 2026-08-26
+
+### 修复
+
+- **插件装坏导致 DSH 启动超时**：插件市场安装带自定义 bundle 约定的元包（如 `@linxin666/dsh-web-ui-all`）时，可能只写进 `profiles/web/package.json` 的 bundles、却没把包（及其成员插件）真正装进 `~/.dsh/node_modules`，DSH 启动加载即 `ERR_MODULE_NOT_FOUND` 崩/挂，壳只报笼统的「启动超时（30s）」。现改为启动自愈：30s 内没出端口时，解析本次启动新增的 stderr，自动把「声明了却没装」或「成员包缺失」的非核心插件从 profile 剥离并重启（最多 3 轮）；核心包（`@iyam/*`、`@deepseek-ai/*`、`dshmarket`）永不剥离。剥离成功后发 `dsh-plugins-auto-disabled` 事件（前端可弹通知告知用户禁用项），仍起不来则透出真实缺失包名而非笼统超时。
+
 ## [0.1.0] - 2026-08-20
 
 ### 修复

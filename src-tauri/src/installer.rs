@@ -868,19 +868,18 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
     Ok(())
 }
 
-/// 为 native 目录选择器的对话框 worker 打 owner 补丁（幂等）。同前。
-pub(crate) fn ensure_picker_owner_patch(home: &PathBuf) {
-    let worker = home
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh-host-directory-picker-native")
-        .join("lib")
-        .join("worker.cjs");
-    let content = match fs::read_to_string(&worker) {
+/// 对话框 owner 补丁已生效的特征串（用于幂等判断）。
+const PICKER_OWNER_PATCHED: &str =
+    "const _h = process.env.DSH_DIALOG_OWNER_HWND; let _o = null; if (_h && /^[0-9]+$/.test(_h)) { const _n = Number(_h); if (_n > 0 && _n <= 0x7fffffff) { _o = _n; } }";
+
+/// 给单个 `dsh-host-directory-picker-native/lib/worker.cjs` 打 owner 补丁（幂等）。
+/// DSH 选目录对话框以主窗口 HWND 为 owner → 不占独立任务栏按钮、图标继承应用。
+fn patch_picker_worker_file(worker: &PathBuf) {
+    let content = match fs::read_to_string(worker) {
         Ok(c) => c,
         Err(_) => return,
     };
-    if content.contains("const _h = process.env.DSH_DIALOG_OWNER_HWND; let _o = null; if (_h && /^[0-9]+$/.test(_h)) { const _n = Number(_h); if (_n > 0 && _n <= 0x7fffffff) { _o = _n; } }") {
+    if content.contains(PICKER_OWNER_PATCHED) {
         return;
     }
     const FROM: &str = "show: () => method(dialog, SLOT_SHOW, protoShow)(null),";
@@ -890,15 +889,64 @@ pub(crate) fn ensure_picker_owner_patch(home: &PathBuf) {
     let base = content.replace(OLD_TO, FROM).replace(OLD_KOFFI, FROM);
     if base.contains(FROM) {
         let patched = base.replace(FROM, TO);
-        if let Err(e) = fs::write(&worker, patched) {
+        if let Err(e) = fs::write(worker, patched) {
             log::warn!("写目录选择器 owner 补丁失败({}): {e}", worker.display());
         } else {
             log::info!("已为目录选择器打 owner 补丁: {}", worker.display());
         }
     } else {
         log::warn!(
-            "worker.cjs 结构变化，未打对话框 owner 补丁（引擎升级后需同步；目录选择仍可用，仅对话框图标为 node）"
+            "worker.cjs 结构变化，未打对话框 owner 补丁（引擎升级后需同步；目录选择仍可用，仅对话框图标为 node）: {}",
+            worker.display()
         );
+    }
+}
+
+/// 为 native 目录选择器的对话框 worker 打 owner 补丁（幂等）。
+///
+/// DSH 因 npm 嵌套依赖，`dsh-host-directory-picker-native` 可能同时存在于顶层
+/// `node_modules/@deepseek-ai/...` 与嵌套 `node_modules/<pkg>/node_modules/@deepseek-ai/...`。
+/// Node 解析依赖时就近取嵌套副本——若只补顶层，运行时加载的仍是未补丁副本，对话框无
+/// owner → 任务栏多出 node 图标。故递归遍历 `node_modules` 下所有副本一并补丁。
+pub(crate) fn ensure_picker_owner_patch(home: &PathBuf) {
+    let root = home.join("node_modules");
+    if root.is_dir() {
+        visit_picker_workers(&root, 0);
+    }
+}
+
+/// 递归查找并补丁所有 `dsh-host-directory-picker-native/lib/worker.cjs`。
+/// 命中终端包即补丁且不再下钻；跳过符号链接防环；限制深度防极端嵌套。
+fn visit_picker_workers(dir: &PathBuf, depth: u32) {
+    if depth > 24 {
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ft = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            continue; // 跳过符号链接，避免环
+        }
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = match entry.file_name().to_str() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if name == "dsh-host-directory-picker-native" {
+            let worker = path.join("lib").join("worker.cjs");
+            patch_picker_worker_file(&worker);
+        } else {
+            visit_picker_workers(&path, depth + 1);
+        }
     }
 }
 
