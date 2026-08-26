@@ -224,69 +224,122 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("无法启动 DSH: {}", e))?;
-    let pid = child.id();
+    // 启动并等待端口；失败则自愈（自动剥离加载失败的插件）后重试，最多 3 轮。
+    let max_retries = 3;
+    let mut all_removed: Vec<String> = Vec::new();
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        // 记录本次启动前的 stderr 长度，便于只解析本轮新增的错误
+        let stderr_len = fs::metadata(home.join(".iyam-dsh-stderr.log"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        match spawn_and_wait_port(&app, &mut cmd, &home, &pid_file) {
+            Ok(port) => {
+                if !all_removed.is_empty() {
+                    let _ = app.emit("dsh-plugins-auto-disabled", all_removed.clone());
+                }
+                return Ok(port);
+            }
+            Err(_) => {
+                let tail = read_stderr_tail(&home.join(".iyam-dsh-stderr.log"), stderr_len);
+                let missing = parse_missing_packages(&tail);
+                // 无插件可剥离，或已达重试上限：回滚升级（若适用）并报真实错误
+                if missing.is_empty() || attempt >= max_retries {
+                    if crate::downloader::rollback_after_failure(&home) {
+                        let _ = app.emit("dsh-update-failed", ());
+                    }
+                    return Err(real_start_error(&tail, &all_removed));
+                }
+                let removed = quarantine_broken_plugins(&home, &missing);
+                if removed.is_empty() {
+                    if crate::downloader::rollback_after_failure(&home) {
+                        let _ = app.emit("dsh-update-failed", ());
+                    }
+                    return Err(real_start_error(&tail, &all_removed));
+                }
+                log::warn!(
+                    "DSH 启动失败，自动禁用 {} 个无法加载的插件: {}",
+                    removed.len(),
+                    removed.join(", ")
+                );
+                all_removed.extend(removed);
+                // 继续循环重试（已写回 profiles/web/package.json）
+            }
+        }
+    }
+}
 
-    fs::write(&pid_file, pid.to_string()).ok();
+/// 启动 DSH 子进程并等待其打出端口行。
+/// 成功：完成端口落盘、子进程守护、市场弹窗等全部收尾，返回端口。
+/// 失败（超时/早退）：杀掉子进程并等 stderr 落盘，返回 `Err(())`。
+fn spawn_and_wait_port(
+    app: &tauri::AppHandle,
+    cmd: &mut Command,
+    home: &PathBuf,
+    pid_file: &PathBuf,
+) -> Result<u16, ()> {
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("无法启动 DSH: {}", e);
+            return Err(());
+        }
+    };
+    fs::write(pid_file, child.id().to_string()).ok();
 
-    // 先取出 stdout/stderr pipe
-    let stdout = child.stdout.take().ok_or("无法获取 stdout")?;
-    let stderr = child.stderr.take().ok_or("无法获取 stderr")?;
+    // 落盘 stderr 便于排查；保留 JoinHandle 以便失败时等其刷完
+    let stderr_log = home.join(".iyam-dsh-stderr.log");
+    let drain = child.stderr.take().map(|stderr| {
+        let log_path = stderr_log.clone();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let reader = BufReader::new(stderr);
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .ok();
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        log::info!("[dsh] {}", l);
+                        if let Some(f) = file.as_mut() {
+                            let _ = writeln!(f, "{}", l);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    });
 
-    let port_regex = Regex::new(r"dsh\s+web:\s+http://127\.0\.0\.1:(\d+)").unwrap();
-
-    // Thread to read port from stdout（只传 stdout pipe，不传 child）
+    let stdout = match child.stdout.take() {
+        Some(o) => o,
+        None => return Err(()),
+    };
     let port_handle = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let re = Regex::new(r"dsh\s+web:\s+http://127\.0\.0\.1:(\d+)").unwrap();
         for line in reader.lines() {
-            match line {
-                Ok(l) => {
-                    if let Some(cap) = port_regex.captures(&l) {
-                        if let Some(port_match) = cap.get(1) {
-                            if let Ok(port) = port_match.as_str().parse::<u16>() {
-                                return Some(port);
-                            }
+            if let Ok(l) = line {
+                if let Some(cap) = re.captures(&l) {
+                    if let Some(m) = cap.get(1) {
+                        if let Ok(p) = m.as_str().parse::<u16>() {
+                            return Some(p);
                         }
                     }
                 }
-                Err(_) => break,
             }
         }
         None
     });
 
-    // Drain stderr（只传 stderr pipe），并落盘便于排查 DSH 行为
-    let stderr_log = home.join(".iyam-dsh-stderr.log");
-    std::thread::spawn(move || {
-        use std::io::Write;
-        let reader = BufReader::new(stderr);
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&stderr_log)
-            .ok();
-        for line in reader.lines() {
-            match line {
-                Ok(l) => {
-                    log::info!("[dsh] {}", l);
-                    if let Some(f) = file.as_mut() {
-                        let _ = writeln!(f, "{}", l);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Wait for port with 30s timeout
     match port_handle.join() {
         Ok(Some(port)) => {
-            // 若本次启动来自刚提升的升级版本，确认成功后清除 applying 标记
-            crate::downloader::clear_applying(&home);
+            crate::downloader::clear_applying(home);
             fs::write(home.join(".iyam-dsh.port"), port.to_string()).ok();
             let _ = app.emit("dsh-port-ready", port);
-
-            // 成功后才将 child 存入全局静态，并启动守护线程监听进程退出
             {
                 let mut global = DSH_CHILD.lock().unwrap();
                 if let Some(old) = global.as_mut() {
@@ -294,15 +347,11 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
                 }
                 *global = Some(child);
             }
-
-            // 启动成功：若 dshmarket 市场尚未安装，弹窗询问用户是否安装（不强制）。
-            if !crate::installer::dshmarket_installed(&home) {
+            if !crate::installer::dshmarket_installed(home) {
                 let _ = app.emit("dshmarket-offer-install", ());
             }
-
             let exit_app = app.clone();
             std::thread::spawn(move || {
-                // 先取出 child 并立即释放锁，再 wait，避免持有锁期间阻塞导致死锁
                 let taken = if let Ok(mut locked) = DSH_CHILD.lock() {
                     locked.take()
                 } else {
@@ -313,20 +362,179 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
                     let _ = exit_app.emit("dsh-process-exit", ());
                 }
             });
-
             Ok(port)
         }
         _ => {
-            // 超时或端口读取失败：child 仍在作用域内，直接 kill
-            child.kill().ok();
-            fs::remove_file(&pid_file).ok();
-            // 若本次启动来自刚提升的升级版本且起不来，回滚到上一个可用版本
-            if crate::downloader::rollback_after_failure(&home) {
-                let _ = app.emit("dsh-update-failed", ());
+            let _ = child.kill();
+            fs::remove_file(pid_file).ok();
+            if let Some(h) = drain {
+                let _ = h.join();
             }
-            Err("DSH 启动超时（30s），请查看日志".to_string())
+            Err(())
         }
     }
+}
+
+/// 从一段 stderr 文本里解析出所有 `Cannot find package '<pkg>'` 的包名（去重、保序）。
+fn parse_missing_packages(text: &str) -> Vec<String> {
+    let re = Regex::new(r"Cannot find package '([^']+)'").unwrap();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for cap in re.captures_iter(text) {
+        let pkg = cap[1].to_string();
+        if seen.insert(pkg.clone()) {
+            out.push(pkg);
+        }
+    }
+    out
+}
+
+/// 读取 stderr 日志从指定字节偏移到末尾（只取本次启动新增部分）。
+fn read_stderr_tail(path: &PathBuf, from: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    match std::fs::File::open(path) {
+        Ok(mut f) => {
+            if f.seek(SeekFrom::Start(from)).is_err() {
+                return String::new();
+            }
+            let mut s = String::new();
+            let _ = f.read_to_string(&mut s);
+            s
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// 核心 bundle 永不自动剥离，避免把 DSH / 内置插件搞挂。
+fn is_core_bundle(name: &str) -> bool {
+    name.starts_with("@iyam/") || name.starts_with("@deepseek-ai/") || name == "dshmarket"
+}
+
+/// 判断某个已安装 bundle 的成员（dsh.bundles / dependencies）是否包含缺失包。
+fn bundle_references_missing(
+    home: &PathBuf,
+    bundle: &str,
+    missing: &std::collections::HashSet<&str>,
+) -> bool {
+    let content = match fs::read_to_string(home.join("node_modules").join(bundle).join("package.json")) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Some(arr) = val
+        .get("dsh")
+        .and_then(|d| d.get("bundles"))
+        .and_then(|a| a.as_array())
+    {
+        for it in arr {
+            if let Some(s) = it.as_str() {
+                names.push(s.to_string());
+            }
+        }
+    }
+    if let Some(obj) = val.get("dependencies").and_then(|d| d.as_object()) {
+        for k in obj.keys() {
+            names.push(k.clone());
+        }
+    }
+    if let Some(obj) = val
+        .get("dsh")
+        .and_then(|d| d.get("dependencies"))
+        .and_then(|d| d.as_object())
+    {
+        for k in obj.keys() {
+            names.push(k.clone());
+        }
+    }
+    names.iter().any(|n| missing.contains(n.as_str()))
+}
+
+/// 把 `profiles/web/package.json` 中「声明了却没装进 node_modules」或「成员包缺失」的非核心
+/// bundle / 依赖自动剥离（核心包除外）。返回被移除的条目名，供通知用户。
+fn quarantine_broken_plugins(home: &PathBuf, missing: &[String]) -> Vec<String> {
+    let profile = home.join("profiles").join("web").join("package.json");
+    let content = match fs::read_to_string(&profile) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut doc: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let missing_set: std::collections::HashSet<&str> = missing.iter().map(|s| s.as_str()).collect();
+    let mut removed: Vec<String> = Vec::new();
+    for field in ["bundles", "dependencies"] {
+        let arr = match doc
+            .get_mut("dsh")
+            .and_then(|d| d.get_mut("profile"))
+            .and_then(|p| p.get_mut(field))
+            .and_then(|a| a.as_array_mut())
+        {
+            Some(a) => a,
+            None => continue,
+        };
+        let mut to_remove = Vec::new();
+        for (i, item) in arr.iter().enumerate() {
+            if let Some(name) = item.as_str() {
+                if is_core_bundle(name) {
+                    continue;
+                }
+                let installed = home.join("node_modules").join(name).exists();
+                let strip = !installed
+                    || missing_set.contains(name)
+                    || bundle_references_missing(home, name, &missing_set);
+                if strip {
+                    to_remove.push(i);
+                }
+            }
+        }
+        for i in to_remove.into_iter().rev() {
+            let v = arr.remove(i);
+            if let Some(s) = v.as_str() {
+                removed.push(s.to_string());
+            }
+        }
+    }
+    if !removed.is_empty() {
+        if let Ok(s) = serde_json::to_string_pretty(&doc) {
+            let _ = fs::write(&profile, s);
+        }
+    }
+    removed
+}
+
+/// 启动失败时构造给用户看的真实错误（尽量透出缺失的插件，而非笼统超时）。
+fn real_start_error(tail: &str, all_removed: &[String]) -> String {
+    if let Some(cap) = Regex::new(r"Cannot find package '([^']+)'")
+        .unwrap()
+        .captures(tail)
+    {
+        let pkg = &cap[1];
+        if all_removed.is_empty() {
+            return format!(
+                "DSH 启动失败：插件 {} 未能加载（ERR_MODULE_NOT_FOUND），请检查插件市场安装后重试，或查看日志",
+                pkg
+            );
+        }
+        return format!(
+            "DSH 启动失败：已自动禁用 {} 个损坏插件（{}），但 {} 仍无法加载，请查看日志",
+            all_removed.len(),
+            all_removed.join("、"),
+            pkg
+        );
+    }
+    if !all_removed.is_empty() {
+        return format!(
+            "DSH 启动失败：已自动禁用 {} 个损坏插件（{}），但 DSH 仍无法启动，请查看日志",
+            all_removed.len(),
+            all_removed.join("、")
+        );
+    }
+    "DSH 启动超时（30s），请查看日志".to_string()
 }
 
 /// Stop the running DSH process
