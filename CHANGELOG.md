@@ -24,6 +24,12 @@
 
 - **插件市场改为询问安装**：启动完成后若 `dshmarket` 尚未安装，弹窗询问用户是否安装；点击「安装」才经 `dsh plugin --profile web add dshmarket` 安装，点击「暂不安装」则不安装、不影响功能。不再首启强制联网安装，无网络/不需要时不再拖慢启动。
 
+## [0.2.1] - 2026-08-26
+
+### 修复
+
+- **目录选择对话框任务栏多出 node 图标**：`ensure_picker_owner_patch` 此前只改了顶层 `worker.cjs`，漏掉 npm 嵌套副本（运行时实际加载的那一份），导致对话框无 owner、单独占任务栏按钮。改为递归遍历 `DSH_HOME/node_modules` 下所有 `dsh-host-directory-picker-native/lib/worker.cjs` 一并打补丁，对话框以主窗口为 owner，不再弹 node 图标。
+
 ## [0.1.0] - 2026-08-20
 
 ### 修复
