@@ -86,7 +86,15 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "iyam-dsh-desktop ${{ github.ref_name }}"
-          releaseBody: "自动构建的安装包，见下方 Assets。"
+          releaseBody: |
+            自动构建的安装包，见下方 Assets。
+
+            ## macOS 打开方法
+            若双击提示「已损坏，无法打开」，是因为发布包未做 Apple 公证（无开发者签名）。在终端执行下面命令去掉下载隔离属性即可正常使用（路径按你实际下载位置调整）：
+
+            xattr -dr com.apple.quarantine ~/Downloads/iyam-dsh_*.dmg /Applications/iyam-dsh.app 2>/dev/null
+
+            然后把 iyam-dsh.app 拖入「应用程序」双击打开；首次若再弹「无法验证开发者」，点「打开」放行一次即可。
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
