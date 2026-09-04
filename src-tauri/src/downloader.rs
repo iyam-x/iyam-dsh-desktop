@@ -124,10 +124,7 @@ pub(crate) async fn latest_dsh_version() -> Result<String, String> {
         if let Ok(resp) = client.get(&url).send().await {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
                 if let Some(v) = json["version"].as_str() {
-                    // 收敛到本 app 兼容上限：超过上限（如 dsh 0.1.2-rc.1 移除了
-                    // `settingsNamespace` 等内置插件依赖的内部导出）绝不自动拉入，
-                    // 否则内置 @iyam 插件启动即报 "does not provide an export named ..."。
-                    return Ok(cap_to_compat(v));
+                    return Ok(v.to_string());
                 }
             }
         }
@@ -141,7 +138,10 @@ pub(crate) async fn latest_dsh_version() -> Result<String, String> {
 pub async fn bootstrap_dsh(app: &AppHandle, home: &PathBuf) -> Result<PathBuf, String> {
     let node = ensure_node(app, home).await?;
     emit_progress(app, "installing-dsh", 0.6);
-    let version = latest_dsh_version().await?;
+    // 收敛到本 app 兼容上限：内置 @iyam 插件针对某一 dsh 版本的客户端/插件 API 编写，
+    // 超过上限的 dsh（如 0.1.2-rc.1 移除 settingsNamespace）会让插件启动即崩，故首次安装
+    // 也只装到兼容版本（用户可手动 npm i -g 自担风险装更新版）。
+    let version = cap_to_compat(&latest_dsh_version().await?);
     log::info!("安装 dsh {} (全局) 到 {:?}", version, home);
     install_dsh_to_tmp(app, &node, &version, home).await?;
     // 把 dsh 内部嵌套的 @deepseek-ai/* 依赖提升到顶层，供 @iyam 插件解析
@@ -153,6 +153,9 @@ pub async fn bootstrap_dsh(app: &AppHandle, home: &PathBuf) -> Result<PathBuf, S
 
 /// 升级备货：以全局方式把目标版本 dsh 装到 `~/.dsh/.staging`（全局布局），写 `.update.json`。
 pub async fn stage_update(app: &AppHandle, home: &PathBuf, target_version: &str) -> Result<(), String> {
+    // 收敛到本 app 兼容上限：dsh 一旦破坏性改动内置 @iyam 插件依赖的内部导出，
+    // 升级即启动失败。超过上限一律降到上限版本，绝不自动拉入破坏性变更。
+    let target_version = cap_to_compat(target_version);
     // 版本未变则无需重新下载/安装：直接跳过，避免每次打开都重跑 npm install。
     // 注意 target_version 可能带 `v` 前缀，与 package.json 的 version 统一去 `v` 比较。
     if let Some(cur) = package_version(home) {

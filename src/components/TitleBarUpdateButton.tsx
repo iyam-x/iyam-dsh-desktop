@@ -30,6 +30,10 @@ type UpdateInfo = {
   latest: string;
   has_update: boolean;
   managed: boolean;
+  /** registry 确有更新，但版本超过内置插件兼容上限，自动更新被拦住 */
+  update_held: boolean;
+  /** 自动更新兼容上限版本 */
+  compat_max: string;
 };
 
 type ToastAction = { label: string; onClick: () => void };
@@ -106,12 +110,19 @@ export function TitleBarUpdateButton() {
           showToast("正在检查更新…", "info");
           const r = await doCheck();
           if (r) {
-            showToast(
-              r.has_update
-                ? `发现新版本 v${r.installed} → v${r.latest}`
-                : `已是最新版本 v${r.installed}`,
-              "ok"
-            );
+            if (r.has_update && r.update_held) {
+              showToast(
+                `发现新版本 v${r.latest}，但自动更新已暂停（兼容上限 v${r.compat_max}）`,
+                "info"
+              );
+            } else {
+              showToast(
+                r.has_update
+                  ? `发现新版本 v${r.installed} → v${r.latest}`
+                  : `已是最新版本 v${r.installed}`,
+                "ok"
+              );
+            }
           }
         },
       })
@@ -134,7 +145,20 @@ export function TitleBarUpdateButton() {
       );
 
       if (info.has_update) {
-        if (info.managed) {
+        if (info.update_held) {
+          // registry 确有更新，但版本超兼容上限：只提示、不提供「下载并更新」，
+          // 避免把破坏性 dsh 版本装进来弄崩内置插件。
+          items.push(
+            await MenuItem.new({
+              text: `新版本 v${info.latest} 已发布（自动更新已暂停）`,
+              enabled: false,
+            }),
+            await MenuItem.new({
+              text: `兼容上限 v${info.compat_max}，等待应用适配`,
+              enabled: false,
+            })
+          );
+        } else if (info.managed) {
           items.push(
             await MenuItem.new({
               text: "下载并更新（下次启动生效）",

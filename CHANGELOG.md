@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.9] - 2026-09-04
+
+### 修复
+
+- **「检查更新」不再显示新版本（回归）**：0.2.8 把兼容上限直接塞进了 `latest_dsh_version()`，导致它被当成「最新版」返回给界面，于是 registry 上更高的 dsh 版本被隐藏、界面永远显示「已是最新」。现改为：版本查询返回 registry **真实最新版**（恢复可见性），兼容上限只作用于**实际安装**——`bootstrap_dsh` / `stage_update` / `trigger_dsh_update` 在装包前用 `cap_to_compat()` 收敛到 `0.1.1-rc.2`。`UpdateInfo` 新增 `update_held` / `compat_max`：当确有更新但超兼容上限时，界面提示「新版本已发布，自动更新已暂停（兼容上限 vX）」，不再提供「下载并更新」按钮，避免把破坏性 dsh 版本装进来。
+
 ## [0.2.8] - 2026-09-04
 
 ### 修复
