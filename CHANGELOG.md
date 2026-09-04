@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.10] - 2026-09-04
+
+### 修复
+
+- **CI 编译失败（类型不匹配）**：0.2.9 在 `stage_update` 内把 `target_version` 收敛为 `String`，但下游 `install_dsh_to_tmp` 形参为 `&str`，传值时未借引用导致 `expected &str, found String`。修正为传 `&target_version`（自动解引用强制转换）。
+
 ## [0.2.9] - 2026-09-04
 
 ### 修复

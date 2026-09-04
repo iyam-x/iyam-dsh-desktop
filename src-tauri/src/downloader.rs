@@ -171,7 +171,7 @@ pub async fn stage_update(app: &AppHandle, home: &PathBuf, target_version: &str)
     let staging = home.join(".staging");
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("创建 staging 失败: {}", e))?;
-    install_dsh_to_tmp(app, &node, target_version, &staging).await?;
+    install_dsh_to_tmp(app, &node, &target_version, &staging).await?;
     emit_progress(app, "staging-deploy", 0.8);
     // staging 已是全局布局（类 Unix 为 staging/lib/node_modules/@deepseek-ai/dsh），无需平铺。
     let update = serde_json::json!({
