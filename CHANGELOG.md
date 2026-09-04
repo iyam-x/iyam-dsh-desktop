@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.7] - 2026-09-04
+
+### 修复
+
+- **「下载并更新」重启后报 `Failed to load plugins / client-modules: HTML did not preload @deepseek-ai/dsh-client-modules/client.js`**：升级提升（promote）只把 dsh 核心包挪到正式目录，但 dsh 的大量 `@deepseek-ai/*` 兄弟包（dsh-client-modules、dsh-host-frontend-static 等）由 npm 以 `--prefix` 安装时 hoist 到 `node_modules/@deepseek-ai/` 顶层、与 dsh 平级（实测 150+ 个包都在该层级），仅随 `.staging` 被删。结果 home 顶层残留旧版 `@deepseek-ai/*`，与新核心版本错配 → boot manifest 与 client-modules 对不上 → 加载失败。现改为**整体把 staging 的 `node_modules` 原子提升到 home**（保留 app 托管的 `@iyam` 插件目录），dsh 核心 + 全部 `@deepseek-ai/*` 依赖一次替换、版本必然一致；回滚逻辑同步改为还原整棵 `node_modules` 备份。
+
 ## [0.2.6] - 2026-09-04
 
 ### 修复

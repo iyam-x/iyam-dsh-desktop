@@ -193,25 +193,37 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
     }
 
     log::info!("提升备货版本 {} → 正式目录", staged);
-    // 全局布局下 dsh 核心包位于 dsh_core_dir()，但 Windows 是 <home>/node_modules/
-    // 而类是 <home>/lib/node_modules/ —— 两侧都必须走 dsh_node_modules() 推导。
-    let core = crate::installer::dsh_core_dir(home);
+    // 关键：提升的是「整个 dsh 依赖闭包」，而非仅 dsh 核心包本身。
+    // npm 以 `--prefix` 安装 dsh 时，会把 dsh 的大量 @deepseek-ai/* 兄弟包
+    // （dsh-client-modules、dsh-host-frontend-static 等）hoist 到
+    // node_modules/@deepseek-ai/ 顶层、与 dsh 平级（实测 150+ 个包都在该层级），
+    // 仅少数嵌套在 dsh/node_modules 下。若只把 dsh 子目录提升、其余兄弟包随
+    // .staging 被删，则 home 顶层残留旧版 @deepseek-ai/*，与新核心版本错配 →
+    // boot manifest 与 client-modules 对不上 → "Failed to load plugins"
+    // （上游 deepseek-harness issues/discussions #4836：HTML did not preload
+    // @deepseek-ai/dsh-client-modules/client.js）。故整体把 staging 的
+    // node_modules 原子提升到 home，仅保留 app 托管的 @iyam 插件目录。
+    let nm = crate::installer::dsh_node_modules(home);
     let staging = home.join(".staging");
+    let staging_nm = crate::installer::dsh_node_modules(&staging);
     let staged_core = crate::installer::dsh_core_dir(&staging);
-    if !staged_core.exists() {
-        log::warn!("备货目录缺少 dsh 核心包: {:?}", staged_core);
+    if !staging_nm.exists() || !staged_core.exists() {
+        log::warn!(
+            "备货目录不完整: staging_nm={:?} staged_core={:?}",
+            staging_nm,
+            staged_core
+        );
         return false;
     }
 
-    // 1. 把当前 core 整个「挪」到 .backup。
-    //    必须用 move_dir（rename）而非逐文件复制：dsh 核心包实测约 260MB / 3 万文件，
-    //    复制一遍要数分钟，会把启动卡死并触发启动超时→回滚。
+    // 1. 把当前整个 node_modules「挪」到 .backup（整体 rename，O(1) 原子，
+    //    避免复制数分钟把启动卡死）。备份结构为 .backup/node_modules_bak。
     let backup = home.join(".backup");
     let _ = fs::remove_dir_all(&backup);
-    let backup_core = crate::installer::dsh_core_dir(&backup);
-    if core.exists() {
-        if let Err(e) = move_dir(&core, &backup_core) {
-            log::warn!("备份当前版本失败，放弃提升: {}", e);
+    let backup_nm = backup.join("node_modules_bak");
+    if nm.exists() {
+        if let Err(e) = move_dir(&nm, &backup_nm) {
+            log::warn!("备份当前依赖闭包失败，放弃提升: {}", e);
             return false;
         }
     }
@@ -227,18 +239,32 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
         serde_json::to_string_pretty(&applying).unwrap(),
     );
 
-    // 3. 把 staging core 整个「挪」到正式位置。rename 是原子的，不会出现
-    //    「先删后拷」留下半残目录导致 dsh 起不来的中间态。
-    if let Err(e) = move_dir(&staged_core, &core) {
-        log::warn!("提升 staging 失败: {}", e);
+    // 3. 把 staging 的整个 node_modules 原子提升到正式位置。rename 不会留下半残目录。
+    if let Err(e) = move_dir(&staging_nm, &nm) {
+        // 提升失败：尽量还原备份，避免留下半残闭包；并清掉 applying 标记以免后续误回滚。
+        log::warn!("提升 staging 依赖闭包失败: {}", e);
+        if backup_nm.is_dir() {
+            let _ = move_dir(&backup_nm, &nm);
+        }
+        let _ = fs::remove_file(&update_path);
         return false;
     }
     let _ = fs::remove_dir_all(&staging);
 
-    // 4. 重建 dsh 启动器 wrapper
+    // 4. 还原 app 托管的 @iyam 插件（staging 闭包不含它，但下次启动 refresh_*_plugin
+    //    会用打包版本覆盖刷新；此处先还原保证即便刷新失败也有可用插件）。
+    let backup_iyam = backup_nm.join("@iyam");
+    let home_iyam = nm.join("@iyam");
+    if backup_iyam.is_dir() {
+        let _ = fs::remove_dir_all(&home_iyam);
+        if let Err(e) = move_dir(&backup_iyam, &home_iyam) {
+            log::warn!("还原 @iyam 插件失败（下次启动会刷新）: {}", e);
+        }
+    }
+
+    // 5. 重建 dsh 启动器 wrapper；把嵌套 @deepseek-ai/* 依赖提到顶层（幂等，供 @iyam 插件解析）。
     let node = crate::installer::managed_node(home);
     let _ = crate::installer::create_wrappers(home, &node);
-    // 提升后同样把嵌套 @deepseek-ai/* 依赖提到顶层，供 @iyam 插件解析。
     hoist_nested_dsh_deps(home);
     log::info!("已提升 dsh 到 {}", staged);
     true
@@ -284,14 +310,15 @@ pub fn rollback_after_failure(home: &PathBuf) -> bool {
     let bad = v["staged_version"].as_str().unwrap_or("").to_string();
     log::warn!("升级版本 {} 启动失败，回滚到上一个可用版本", bad);
 
-    // 还原备份（同样是整体挪回，避免回滚再耗数分钟复制）
+    // 还原整棵依赖闭包备份（整体 rename，避免回滚再耗数分钟复制）。
+    // apply 阶段把整个 node_modules 备份到 .backup/node_modules_bak。
     let backup = home.join(".backup");
-    let core = crate::installer::dsh_core_dir(home);
-    let backup_core = crate::installer::dsh_core_dir(&backup);
-    let _ = fs::remove_dir_all(&core);
-    if backup_core.exists() {
-        if let Err(e) = move_dir(&backup_core, &core) {
-            log::warn!("还原备份失败: {}", e);
+    let backup_nm = backup.join("node_modules_bak");
+    let nm = crate::installer::dsh_node_modules(home);
+    let _ = fs::remove_dir_all(&nm);
+    if backup_nm.is_dir() {
+        if let Err(e) = move_dir(&backup_nm, &nm) {
+            log::warn!("还原依赖闭包失败: {}", e);
         }
     }
     let _ = fs::remove_dir_all(&backup);
