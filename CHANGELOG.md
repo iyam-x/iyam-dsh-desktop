@@ -4,6 +4,26 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.11] - 2026-09-04
+
+### 变更
+
+- **放开 dsh 自动更新上限到 `0.1.2-rc.1`**：内置 `@iyam/*` 插件已适配 dsh 0.1.2-rc.1 的 settings API。
+  - `dsh-rtui-ui`：`@deepseek-ai/dsh-settings` 在 0.1.2-rc.1 移除了 `settingsNamespace` 导出，
+    `settings.register` 改为直接收 namespace 字符串（须小写连字符，如 `"dsh-rtui"`）。移除该 import
+    并把 `register(settingsNamespace(NS), SCHEMA)` 改为 `register(NS, SCHEMA)`。
+  - `dsh-shell-plugin` / `dsh-file-handler` 经核对仅 `inject` `@deepseek-ai/dsh-client-runtime`，
+    不依赖被移除的导出，无需改动。
+  - `DSH_MAX_UPDATE_VERSION` 由 `0.1.1-rc.2` 提到 `0.1.2-rc.1`。
+
+### 修复
+
+- **避免对已坏版本反复重试**：`maybe_auto_stage` 现在读取 `~/.dsh/.update.json` 的 `bad_version`，
+  若该版本正是 registry 最新版则跳过自动备货，避免「备货→启动失败→回滚」每 24h 循环
+  （典型场景：用户装有旧版 `dshmarket`，在 0.1.2-rc.1 上因 `installSettingsSection` 被移除而崩）。
+  `bad_version` 绑定了记录时的 app 版本——本 app 升级（内置插件重新适配）后旧坏标记自动失效，
+  允许换新 app 后重试已修复的升级。
+
 ## [0.2.10] - 2026-09-04
 
 ### 修复

@@ -2,8 +2,8 @@
 // 浏览器 client 半段(exports["./client"] → client.js)通过 ctx.settingsScope
 // 读写该 namespace; 此处把 namespace 在 host 的 settings 服务里登记为可写、可持久化，
 // 否则 settings.update 会因 "not registered" 被静默丢弃(对比度/强调色无反应)。
-// 范式照搬官方 @deepseek-ai/dsh-client-ui-theme/lib/index.js。
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
+// 适配 dsh 0.1.2-rc.1：dsh-settings 移除了 `settingsNamespace` 导出，register 现直接收
+// namespace 字符串（须为小写连字符标识符，如 "dsh-rtui"）。
 import z from "@deepseek-ai/schemastery";
 
 export const name = "dsh-rtui-ui";
@@ -25,7 +25,7 @@ const RTUI_SETTINGS_SCHEMA = z.object({
 
 function apply(ctx) {
   ctx.inject(["settings"], (settingsCtx) => {
-    settingsCtx.settings.register(settingsNamespace(RTUI_SETTINGS_NAMESPACE), RTUI_SETTINGS_SCHEMA);
+    settingsCtx.settings.register(RTUI_SETTINGS_NAMESPACE, RTUI_SETTINGS_SCHEMA);
   });
 }
 

@@ -96,13 +96,13 @@ fn node_archive(target: &str) -> (&str, &str, &str) {
 /// 托管自动更新允许升到的「最高兼容 dsh 版本」。
 ///
 /// 本 app 内置的 `@iyam/*` 插件（dsh-rtui-ui / dsh-shell-plugin / dsh-file-handler）在构建时
-/// 针对某一 dsh 版本的客户端/插件 API 编写——例如 `dsh-rtui-ui` 从 `@deepseek-ai/dsh-settings`
-/// 导入 `settingsNamespace`。dsh 一旦破坏性改动这些**内部**导出（如 `0.1.2-rc.1` 移除
-/// `settingsNamespace` / `installSettingsSection`），升级后内置插件即报
-/// "does not provide an export named ..."，整棵 dsh 启动失败。
-/// 故托管自动更新只升到本常量声明的版本；超过则不强更（用户可手动 `npm i -g` 自担风险）。
-/// 当内置插件随新 dsh API 重新验证/移植后，再上调此值。
-pub(crate) const DSH_MAX_UPDATE_VERSION: &str = "0.1.1-rc.2";
+/// 针对某一 dsh 版本的客户端/插件 API 编写。dsh 的**内部**导出会破坏性变更——例如
+/// `0.1.2-rc.1` 移除了 `@deepseek-ai/dsh-settings` 的 `settingsNamespace` 导出，旧插件
+/// 升级后即报 "does not provide an export named ..."，整棵 dsh 启动失败。本 app 已随
+/// `0.1.2-rc.1` 重新适配相应插件（如 `dsh-rtui-ui` 改用 `settings.register(ns, schema)` 字符串 API），
+/// 故把它设为兼容上限；超过则不强更（用户可手动 `npm i -g` 自担风险）。
+/// 当内置插件随更新的 dsh API 再次验证/移植后，再上调此值。
+pub(crate) const DSH_MAX_UPDATE_VERSION: &str = "0.1.2-rc.1";
 
 /// 把「目标更新版本」收敛到本 app 兼容上限：超过上限则回退到上限版本，避免拉入破坏性变更。
 pub(crate) fn cap_to_compat(latest: &str) -> String {
@@ -353,10 +353,12 @@ pub fn rollback_after_failure(home: &PathBuf) -> bool {
     }
     let _ = fs::remove_dir_all(&backup);
 
-    // 标记 bad，避免再次升级到该版本
+    // 标记 bad，避免再次升级到该版本。附上 app 版本：内置插件随 app 升级重新适配后，
+    // 旧坏标记即失效（见 updater::read_bad_version），允许换个已修复的 app 后重试。
     let failed = serde_json::json!({
         "status": "failed",
         "bad_version": bad,
+        "app_version": env!("CARGO_PKG_VERSION"),
     });
     let _ = fs::write(
         &update_path,

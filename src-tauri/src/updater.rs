@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -102,6 +103,15 @@ async fn maybe_auto_stage(app: &tauri::AppHandle, latest: &str) {
         ),
     );
 
+    // 已知坏版本防护：若 registry 最新版正是 .update.json 里标记失败的版本，跳过自动备货，
+    // 避免每 24h 反复「备货→启动失败→回滚」循环（如用户装有旧版 dshmarket 在 0.1.2-rc.1 上崩）。
+    // 用户仍可在「检查更新」里看到该版本、手动决定。
+    if let Some(bad) = read_bad_version(&home) {
+        if bad == latest {
+            return;
+        }
+    }
+
     let app_c = app.clone();
     let latest_c = latest.to_string();
     tauri::async_runtime::spawn(async move {
@@ -109,6 +119,20 @@ async fn maybe_auto_stage(app: &tauri::AppHandle, latest: &str) {
             log::warn!("自动备货失败: {}", e);
         }
     });
+}
+
+/// 读取 .update.json 里标记的 bad_version（仅当 status=="failed" 且为「同一 app 版本」记录的）。
+/// 绑定 app 版本可避免：本 app 升级（内置插件重新适配）后，旧版本的坏标记仍拦着已修复的升级。
+fn read_bad_version(home: &PathBuf) -> Option<String> {
+    let content = fs::read_to_string(home.join(".update.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    if v["status"].as_str() == Some("failed")
+        && v["app_version"].as_str() == Some(env!("CARGO_PKG_VERSION"))
+    {
+        v["bad_version"].as_str().map(|s| s.to_string())
+    } else {
+        None
+    }
 }
 
 async fn get_installed_version() -> Result<String, String> {
