@@ -139,6 +139,7 @@ fn main() {
             file_preview::read_file_data,
             file_preview::write_text_file,
             installer::install_dshmarket,
+            app_commands::restart_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -155,6 +156,20 @@ fn main() {
             let _ = std::fs::remove_file(home.join(".iyam-dsh.port"));
         }
     });
+}
+
+/// 应用级命令实现
+mod app_commands {
+    /// 重启本应用（dsh 升级备货完成后「立即重启」）。
+    ///
+    /// 走 `app.restart()`：会先触发 `RunEvent::ExitRequested`，复用现有清理（杀 DSH 子进程、
+    /// 删 pid/port 文件），再由 tauri 重新拉起进程。必须先停 DSH，否则新实例启动时
+    /// 旧版本的原生模块（.node）仍被占用，升级提升会失败。
+    /// 注意：该函数不会返回（进程被替换），前端 invoke 的 promise 不会 resolve。
+    #[tauri::command]
+    pub fn restart_app(app: tauri::AppHandle) {
+        app.restart();
+    }
 }
 
 /// 托盘相关命令实现

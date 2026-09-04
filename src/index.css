@@ -154,6 +154,21 @@ body,
 .tb-toast--err {
   background: rgba(190, 18, 60, 0.95);
 }
+/* 父级 .tb-toast 关了指针事件，按钮必须显式打开才可点击 */
+.tb-toast-action {
+  pointer-events: auto;
+  margin-left: 10px;
+  padding: 3px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.tb-toast-action:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
 @keyframes tb-toast-in {
   from {
     opacity: 0;

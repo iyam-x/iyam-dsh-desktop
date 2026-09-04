@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 
@@ -31,7 +32,21 @@ type UpdateInfo = {
   managed: boolean;
 };
 
-type Toast = { text: string; kind: "info" | "ok" | "err" } | null;
+type ToastAction = { label: string; onClick: () => void };
+type Toast = { text: string; kind: "info" | "ok" | "err"; action?: ToastAction } | null;
+
+// 备货阶段文案（后端 dsh-install-progress 事件的 stage）。
+const STAGE_TEXT: Record<string, string> = {
+  "downloading-node": "正在下载 Node 运行环境...",
+  "staging-download": "正在准备更新...",
+  "installing-dsh": "正在安装新版本...",
+  "resolving-deps": "正在解析依赖...",
+  "downloading-deps": "正在下载依赖...",
+  "repairing-dsh": "正在校验并修复...",
+  "staging-deploy": "正在部署新版本...",
+  "staging-ready": "备货完成...",
+  finalizing: "正在收尾...",
+};
 
 // 阻止冒泡，避免触发标题栏拖拽
 function stopDragPropagation(e: ReactMouseEvent) {
@@ -51,10 +66,18 @@ export function TitleBarUpdateButton() {
     };
   }, []);
 
-  function showToast(text: string, kind: "info" | "ok" | "err" = "info") {
-    setToast({ text, kind });
+  // sticky：不自动消失（用于需要用户操作的提示，如备货完成后的「立即重启」）。
+  function showToast(
+    text: string,
+    kind: "info" | "ok" | "err" = "info",
+    action?: ToastAction,
+    sticky = false
+  ) {
+    setToast({ text, kind, action });
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+    toastTimer.current = sticky
+      ? null
+      : window.setTimeout(() => setToast(null), 2600);
   }
 
   async function doCheck(): Promise<UpdateInfo | null> {
@@ -116,17 +139,41 @@ export function TitleBarUpdateButton() {
             await MenuItem.new({
               text: "下载并更新（下次启动生效）",
               action: async () => {
+                // 备货要走一遍 npm 安装（约 1 分钟），实时透出阶段与百分比，
+                // 避免点了之后长时间没有任何反馈。
+                const unlisten = await listen<{
+                  stage: string;
+                  progress: number;
+                }>("dsh-install-progress", (event) => {
+                  const { stage, progress } = event.payload;
+                  const label = STAGE_TEXT[stage] ?? "正在更新...";
+                  const pct =
+                    typeof progress === "number"
+                      ? ` ${Math.round(progress * 100)}%`
+                      : "";
+                  showToast(`${label}${pct}`, "info", undefined, true);
+                }).catch(() => null);
+                showToast("正在下载更新...", "info", undefined, true);
                 try {
                   await invoke("trigger_dsh_update");
                   await invoke("notify", {
                     title: "dsh 更新已备货",
                     body: "重启应用后生效",
                   });
+                  showToast(
+                    "更新已备货，重启后生效",
+                    "ok",
+                    { label: "立即重启", onClick: () => void invoke("restart_app") },
+                    true
+                  );
                 } catch (err) {
                   await invoke("notify", {
                     title: "dsh 更新失败",
                     body: String(err ?? "未知错误"),
                   });
+                  showToast(`更新失败：${String(err ?? "未知错误")}`, "err");
+                } finally {
+                  unlisten?.();
                 }
               },
             })
@@ -180,7 +227,16 @@ export function TitleBarUpdateButton() {
       </button>
       {toast && (
         <div className={`tb-toast tb-toast--${toast.kind}`} role="status">
-          {toast.text}
+          <span>{toast.text}</span>
+          {toast.action && (
+            <button
+              className="tb-toast-action"
+              onClick={toast.action.onClick}
+              onMouseDown={stopDragPropagation}
+            >
+              {toast.action.label}
+            </button>
+          )}
         </div>
       )}
     </>

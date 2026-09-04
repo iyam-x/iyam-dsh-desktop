@@ -198,18 +198,22 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
     let core = crate::installer::dsh_core_dir(home);
     let staging = home.join(".staging");
     let staged_core = crate::installer::dsh_core_dir(&staging);
+    if !staged_core.exists() {
+        log::warn!("备货目录缺少 dsh 核心包: {:?}", staged_core);
+        return false;
+    }
 
-    // 1. 备份当前 core 到 .backup
+    // 1. 把当前 core 整个「挪」到 .backup。
+    //    必须用 move_dir（rename）而非逐文件复制：dsh 核心包实测约 260MB / 3 万文件，
+    //    复制一遍要数分钟，会把启动卡死并触发启动超时→回滚。
     let backup = home.join(".backup");
     let _ = fs::remove_dir_all(&backup);
-    fs::create_dir_all(&backup).ok();
-    let backup_core = backup
-        .join("lib")
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh");
+    let backup_core = crate::installer::dsh_core_dir(&backup);
     if core.exists() {
-        copy_dir_follow_symlinks(&core, &backup_core).ok();
+        if let Err(e) = move_dir(&core, &backup_core) {
+            log::warn!("备份当前版本失败，放弃提升: {}", e);
+            return false;
+        }
     }
 
     // 2. 标记 applying（供启动成功清除 / 失败回滚判断）
@@ -223,9 +227,9 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
         serde_json::to_string_pretty(&applying).unwrap(),
     );
 
-    // 3. 清旧 core，复制 staging core 到正式位置
-    let _ = fs::remove_dir_all(&core);
-    if let Err(e) = copy_dir_follow_symlinks(&staged_core, &core) {
+    // 3. 把 staging core 整个「挪」到正式位置。rename 是原子的，不会出现
+    //    「先删后拷」留下半残目录导致 dsh 起不来的中间态。
+    if let Err(e) = move_dir(&staged_core, &core) {
         log::warn!("提升 staging 失败: {}", e);
         return false;
     }
@@ -240,8 +244,10 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
     true
 }
 
-/// 启动成功后调用：清除 applying 标记（升级成功）。
+/// 启动成功后调用：清除 applying 标记（升级成功），并清掉升级用的备份目录。
+/// `.backup` 是上一版本的完整副本（约 260MB），升级成功即无用，不再长期占磁盘。
 pub fn clear_applying(home: &PathBuf) {
+    let _ = fs::remove_dir_all(home.join(".backup"));
     let update_path = home.join(".update.json");
     if !update_path.exists() {
         return;
@@ -278,17 +284,15 @@ pub fn rollback_after_failure(home: &PathBuf) -> bool {
     let bad = v["staged_version"].as_str().unwrap_or("").to_string();
     log::warn!("升级版本 {} 启动失败，回滚到上一个可用版本", bad);
 
-    // 还原备份（全局布局：core 在 <home>/lib/node_modules/@deepseek-ai/dsh，类 Unix）
+    // 还原备份（同样是整体挪回，避免回滚再耗数分钟复制）
     let backup = home.join(".backup");
     let core = crate::installer::dsh_core_dir(home);
-    let backup_core = backup
-        .join("lib")
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh");
+    let backup_core = crate::installer::dsh_core_dir(&backup);
     let _ = fs::remove_dir_all(&core);
     if backup_core.exists() {
-        let _ = copy_dir_follow_symlinks(&backup_core, &core);
+        if let Err(e) = move_dir(&backup_core, &core) {
+            log::warn!("还原备份失败: {}", e);
+        }
     }
     let _ = fs::remove_dir_all(&backup);
 
@@ -788,6 +792,40 @@ fn hoist_nested_dsh_deps(home: &PathBuf) {
             log::info!("hoist 依赖到顶层: {}", name.to_string_lossy());
         }
     }
+}
+
+/// 整体挪动目录：优先 `rename`（同文件系统下是 O(1) 原子操作）。
+///
+/// dsh 核心包约 260MB / 3 万文件，逐文件复制要数分钟；提升/回滚都走这里才能做到秒级，
+/// 且不留下半残目录。rename 会失败的场景（跨设备、目标已存在、Windows 上文件被占用）
+/// 回退到逐文件复制并删除源目录，保证语义仍是「移动」。
+fn move_dir(src: &Path, dst: &Path) -> Result<(), String> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    // rename 也可能因「刚被杀死的 dsh 进程还没释放文件锁」而短暂失败（Windows 常见），
+    // 先重试几次：回退到逐文件复制要数分钟，等这不到 1 秒非常划算。
+    let mut last_err = None;
+    for attempt in 0..4 {
+        match fs::rename(src, dst) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 3 {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            }
+        }
+    }
+    log::warn!(
+        "rename {:?} → {:?} 失败({:?})，回退逐文件复制",
+        src,
+        dst,
+        last_err
+    );
+    copy_dir_follow_symlinks(src, dst).map_err(|e| format!("复制失败: {}", e))?;
+    let _ = fs::remove_dir_all(src);
+    Ok(())
 }
 
 fn copy_dir_follow_symlinks(src: &Path, dst: &Path) -> std::io::Result<()> {
