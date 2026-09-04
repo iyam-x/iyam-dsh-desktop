@@ -131,6 +131,10 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     if let Err(e) = crate::installer::refresh_file_handler_plugin(&app) {
         log::warn!("refresh file-handler plugin failed: {}", e);
     }
+    // 每次启动都校准顶层 `@deepseek-ai/*` 与 core 内嵌版本一致：升级 core 后若顶层残留旧版
+    // 会与新的 client-modules 等错配（如 boot manifest 缺 batches 字段）。版本一致则跳过，
+    // 仅版本变更才重拷，正常启动几乎零开销。
+    crate::downloader::hoist_nested_dsh_deps(&home);
     // 不在此自动预装 dshmarket，改为启动完成后弹窗让用户选择（见下方 dsh-port-ready 后）。
     // 这样无网络/不需要市场时不会拖慢首启，也不强制安装。
 

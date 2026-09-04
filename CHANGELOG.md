@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.6] - 2026-09-04
+
+### 修复
+
+- **「下载并更新」重启后报 `Failed to load plugins / client-modules: boot manifest batches must be an array`**：升级 dsh 核心到新版后，顶层 `~/.dsh/node_modules/@deepseek-ai/*`（内置 `@iyam` 插件实际解析来源）仍残留旧版，与新版 `dsh-client-modules` / `dsh-host-frontend-static` 等字段错配——旧版 host-frontend-static 生成的 boot manifest 缺 `batches` 字段，新版 client-modules 校验该字段即抛错。现把提升兜底 `hoist_nested_dsh_deps()` 改为「版本不一致即覆盖顶层」而非「顶层存在就跳过」，并改为**每次启动都校准一次**（版本一致则零开销跳过），确保顶层 `@deepseek-ai/*` 永远与当前 core 内嵌版本一致。
+
 ## [0.2.5] - 2026-09-04
 
 ### 修复

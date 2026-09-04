@@ -741,9 +741,16 @@ fn kill_process_tree(pid: u32) {
 /// `node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`），于是 `@iyam` 插件
 /// 解析失败、DSH 启动直接报 `ERR_MODULE_NOT_FOUND`、30s 端口超时。
 ///
-/// 兜底：把 dsh 核心包内部嵌套的 `@deepseek-ai/*` 软链/复制到顶层（仅当顶层缺失时），
-/// 让 `@iyam` 插件能找到。失败仅告警，不阻断启动（部分版本布局不同属正常）。
-fn hoist_nested_dsh_deps(home: &PathBuf) {
+/// 兜底：把 dsh 核心包内部嵌套的 `@deepseek-ai/*` 提到顶层 `node_modules/@deepseek-ai/`，
+/// 让 `@iyam` 插件能找到（Node ESM 只向上找，不会下钻到 core 的嵌套 node_modules）。
+/// 失败仅告警，不阻断启动（部分版本布局不同属正常）。
+///
+/// **版本不一致时必须覆盖**：顶层 `@deepseek-ai/*` 是 dsh 自身的内置包，应以 core 内嵌的
+/// 版本为准。若「顶层优先、永不覆盖」，则升级 core 后顶层仍留旧版，与新的 `dsh-client-modules`
+/// / `dsh-host-frontend-static` 等产生字段或接口错配——典型如旧版 host-frontend-static 生成的
+/// boot manifest 没有 `batches` 字段，而新版 client-modules 校验该字段，启动即报
+/// "boot manifest batches must be an array"。故：同版本跳过，异版本先删顶层再拷 core 内嵌版。
+pub(crate) fn hoist_nested_dsh_deps(home: &PathBuf) {
     let nm = crate::installer::dsh_node_modules(home);
     let nested = nm
         .join("@deepseek-ai")
@@ -760,11 +767,15 @@ fn hoist_nested_dsh_deps(home: &PathBuf) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
+        let src = entry.path();
         let dest = top.join(&name);
         if dest.exists() {
-            continue; // 顶层已有，不覆盖（顶层优先）
+            // 同版本才跳过；异版本则删掉顶层旧版，换上 core 内嵌的新版（见上方说明）。
+            if dir_pkg_version(&dest) == dir_pkg_version(&src) {
+                continue;
+            }
+            let _ = fs::remove_dir_all(&dest);
         }
-        let src = entry.path();
         let res = if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
             // 软链：直接建同名软链指向原目标
             if let Ok(target) = src.read_link() {
@@ -792,6 +803,13 @@ fn hoist_nested_dsh_deps(home: &PathBuf) {
             log::info!("hoist 依赖到顶层: {}", name.to_string_lossy());
         }
     }
+}
+
+/// 读目录内 package.json 的 version；不存在或非包返回 None。
+fn dir_pkg_version(dir: &Path) -> Option<String> {
+    let content = fs::read_to_string(dir.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    v.get("version").and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
 /// 整体挪动目录：优先 `rename`（同文件系统下是 O(1) 原子操作）。
