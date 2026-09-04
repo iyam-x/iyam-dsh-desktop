@@ -93,6 +93,26 @@ fn node_archive(target: &str) -> (&str, &str, &str) {
     }
 }
 
+/// 托管自动更新允许升到的「最高兼容 dsh 版本」。
+///
+/// 本 app 内置的 `@iyam/*` 插件（dsh-rtui-ui / dsh-shell-plugin / dsh-file-handler）在构建时
+/// 针对某一 dsh 版本的客户端/插件 API 编写——例如 `dsh-rtui-ui` 从 `@deepseek-ai/dsh-settings`
+/// 导入 `settingsNamespace`。dsh 一旦破坏性改动这些**内部**导出（如 `0.1.2-rc.1` 移除
+/// `settingsNamespace` / `installSettingsSection`），升级后内置插件即报
+/// "does not provide an export named ..."，整棵 dsh 启动失败。
+/// 故托管自动更新只升到本常量声明的版本；超过则不强更（用户可手动 `npm i -g` 自担风险）。
+/// 当内置插件随新 dsh API 重新验证/移植后，再上调此值。
+pub(crate) const DSH_MAX_UPDATE_VERSION: &str = "0.1.1-rc.2";
+
+/// 把「目标更新版本」收敛到本 app 兼容上限：超过上限则回退到上限版本，避免拉入破坏性变更。
+pub(crate) fn cap_to_compat(latest: &str) -> String {
+    if is_newer(latest, DSH_MAX_UPDATE_VERSION) {
+        DSH_MAX_UPDATE_VERSION.to_string()
+    } else {
+        latest.to_string()
+    }
+}
+
 /// 查询 registry 上 @deepseek-ai/dsh 的最新版本（镜像回退）。
 pub(crate) async fn latest_dsh_version() -> Result<String, String> {
     let client = reqwest::Client::builder()
@@ -104,7 +124,10 @@ pub(crate) async fn latest_dsh_version() -> Result<String, String> {
         if let Ok(resp) = client.get(&url).send().await {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
                 if let Some(v) = json["version"].as_str() {
-                    return Ok(v.to_string());
+                    // 收敛到本 app 兼容上限：超过上限（如 dsh 0.1.2-rc.1 移除了
+                    // `settingsNamespace` 等内置插件依赖的内部导出）绝不自动拉入，
+                    // 否则内置 @iyam 插件启动即报 "does not provide an export named ..."。
+                    return Ok(cap_to_compat(v));
                 }
             }
         }
@@ -257,7 +280,11 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
     let home_iyam = nm.join("@iyam");
     if backup_iyam.is_dir() {
         let _ = fs::remove_dir_all(&home_iyam);
-        if let Err(e) = move_dir(&backup_iyam, &home_iyam) {
+        // 用「复制」而非「移动」：move_dir 在 rename 失败时回退为「复制后删源」，
+        // 会吃掉 .backup 里的 @iyam。一旦新版本启动失败走 rollback_after_failure，
+        // 还原出的 node_modules 闭包将丢失 @iyam，导致下一次启动仍报插件加载失败。
+        // 复制保留备份，使得回滚后 @iyam 仍在（升级成功时 .backup 会被 clear_applying 清掉）。
+        if let Err(e) = copy_dir_follow_symlinks(&backup_iyam, &home_iyam) {
             log::warn!("还原 @iyam 插件失败（下次启动会刷新）: {}", e);
         }
     }

@@ -4,6 +4,13 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.8] - 2026-09-04
+
+### 修复
+
+- **「下载并更新」拉到 dsh 0.1.2-rc.1 后启动报 `DSH 启动超时（30s）`**：该 dsh 版本移除了内置插件依赖的内部导出（`settingsNamespace` / `installSettingsSection`），导致本 app 内置的 `@iyam/*` 插件启动即抛 `does not provide an export named ...`，整棵 DSH 起不来。现增加**兼容性上限**：托管自动更新只升到 `0.1.1-rc.2`（内置插件针对的 dsh API 版本），超过则收敛回退、绝不拉入破坏性变更；待内置插件随新 dsh API 重新验证/移植后再上调该常量（`downloader.rs` 的 `DSH_MAX_UPDATE_VERSION`）。
+- **回滚后 `@iyam` 插件丢失、下次仍启动失败**：升级提升时把 `@iyam` 从备份目录「移动」回 home（`move_dir`），而 `move_dir` 在 rename 失败时会回退为「复制后删源」，吃掉 `.backup` 里的 `@iyam`；一旦新版本启动失败走 `rollback_after_failure`，还原出的 node_modules 闭包便不再含 `@iyam` → 下一次启动仍报插件加载失败。改为用「复制」还原 `@iyam`（保留备份），使回滚后 `@iyam` 仍在、升级成功时由 `clear_applying` 清理备份。
+
 ## [0.2.7] - 2026-09-04
 
 ### 修复
