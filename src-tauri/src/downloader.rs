@@ -193,14 +193,11 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
     }
 
     log::info!("提升备货版本 {} → 正式目录", staged);
-    // 全局布局下 dsh 核心包位于 <home>/lib/node_modules/@deepseek-ai/dsh（类 Unix）。
+    // 全局布局下 dsh 核心包位于 dsh_core_dir()，但 Windows 是 <home>/node_modules/
+    // 而类是 <home>/lib/node_modules/ —— 两侧都必须走 dsh_node_modules() 推导。
     let core = crate::installer::dsh_core_dir(home);
-    let staged_core = home
-        .join(".staging")
-        .join("lib")
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh");
+    let staging = home.join(".staging");
+    let staged_core = crate::installer::dsh_core_dir(&staging);
 
     // 1. 备份当前 core 到 .backup
     let backup = home.join(".backup");
@@ -232,7 +229,7 @@ pub fn apply_staged_if_ready(home: &PathBuf) -> bool {
         log::warn!("提升 staging 失败: {}", e);
         return false;
     }
-    let _ = fs::remove_dir_all(&home.join(".staging"));
+    let _ = fs::remove_dir_all(&staging);
 
     // 4. 重建 dsh 启动器 wrapper
     let node = crate::installer::managed_node(home);
@@ -537,7 +534,7 @@ async fn install_dsh_to_tmp(
     // 安装后自愈：npm install 可能因镜像分发了坏 tarball（如 `bin.js` 是坏壳子）而"成功"
     // 返回，但 dsh 实际起不来。此处校验入口是否真能跑；不能跑则换源重装——
     // 优先用官方 npmjs（canonical，tarball 最权威）覆盖坏镜像副本。
-    if !crate::installer::dsh_entry_runs(prefix) {
+    if !crate::installer::dsh_entry_runs(prefix, node) {
         log::warn!("dsh 入口不可用（疑似镜像坏包），换官方源重装");
         emit_progress(app, "repairing-dsh", 0.9);
         let npm_c = npm_cli.clone();
@@ -559,7 +556,7 @@ async fn install_dsh_to_tmp(
         .await
         .map_err(|e| format!("重装线程失败: {}", e))?;
         repair?;
-        if !crate::installer::dsh_entry_runs(prefix) {
+        if !crate::installer::dsh_entry_runs(prefix, node) {
             return Err("dsh 安装后入口仍不可用，可能镜像源均异常，请检查网络后重试。".into());
         }
     }

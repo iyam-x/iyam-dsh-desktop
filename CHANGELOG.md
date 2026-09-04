@@ -4,6 +4,13 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.4] - 2026-09-04
+
+### 修复
+
+- **「检查更新」必报「安装后入口仍不可用，可能镜像源均异常」**：备货阶段的自愈校验 `dsh_entry_runs()` 用 `managed_node(home)` 推导 node 路径，而备货时传入的 `home` 是 `~/.dsh/.staging`，node 实际装在 `~/.dsh/node/` 下，于是永远找不到 node、把装好的好包误判为坏包，还会无谓地换官方源重装一次。改为由调用方显式传入托管 node 路径。
+- **Windows 上备货版本无法提升（升级永远不生效）**：`apply_staged_if_ready()` 把 staging 内的包路径硬编码为 `staging/lib/node_modules/...`（类 Unix 布局），而 Windows 的 npm 全局布局是 `staging/node_modules/...`，复制源不存在导致提升失败并静默回退到旧版本。改为与正式目录一样走 `dsh_node_modules()` 推导。
+
 ## [0.2.3] - 2026-08-26
 
 ### 变更

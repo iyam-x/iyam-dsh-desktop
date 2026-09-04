@@ -1,6 +1,6 @@
 [package]
 name = "iyam-dsh-desktop"
-version = "0.2.3"
+version = "0.2.4"
 description = "DeepSeek Harness Desktop App"
 authors = []
 license = "MIT"
@@ -14,7 +14,7 @@ tauri-build = { version = "2", features = [] }
 # tauri feature 不启用 macos-private-api：该 feature 只对 macOS 目标合法，在 Windows/Linux
 # 上会让 tauri-build 的 allowlist 校验失败（"remove the macos-private-api feature"）。
 # 目前代码未使用 macOS 私有 API，故不启用。
-tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png", "devtools"] }
+tauri = { version = "2", features = [ "tray-icon", "image-png", "devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-store = "2"
 tauri-plugin-notification = "2"

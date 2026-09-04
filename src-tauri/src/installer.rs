@@ -960,19 +960,22 @@ pub(crate) fn managed_node(home: &PathBuf) -> PathBuf {
     }
 }
 
-/// 校验本 app 托管安装的 dsh 入口是否真的能跑（`bin.js` 存在且托管 node 跑 `--version` 成功）。
+/// 校验本 app 托管安装的 dsh 入口是否真的能跑（`bin.js` 存在且给定 node 跑 `--version` 成功）。
 /// 用于安装后自愈：部分镜像分发的 tarball 里 `bin.js` 是坏掉的 `#!/bin/sh` 自调用壳子，
 /// npm install 仍会"成功"返回，但 dsh 根本起不来。此函数能捕获这类坏包，触发换源重装。
-pub(crate) fn dsh_entry_runs(home: &PathBuf) -> bool {
+///
+/// `node` 必须显式传入：安装目标 `home` 可能是备货目录（`<home>/.staging`），而托管 node
+/// 只装在 `<home>/node` 下——若在此处用 `managed_node(home)` 推导，备货态会找不到 node
+/// 而把好包误判为坏包（升级永远报"入口不可用"）。
+pub(crate) fn dsh_entry_runs(home: &PathBuf, node: &PathBuf) -> bool {
     let bin_js = dsh_bin_js(home);
     if !bin_js.exists() {
         return false;
     }
-    let node = managed_node(home);
     if !node.exists() {
         return false;
     }
-    verify_dsh_entry(&bin_js, &Some(node))
+    verify_dsh_entry(&bin_js, &Some(node.clone()))
 }
 
 /// 托管 node 所在目录（含 `node` 可执行）。dsh 入口（`home/bin/dsh` 软链到 .js，
