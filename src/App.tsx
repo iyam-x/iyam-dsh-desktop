@@ -11,7 +11,7 @@ type AppStatus = "installing" | "loading" | "ready" | "crashed" | "error";
 interface InstallState {
   status: AppStatus;
   message: string;
-  port?: number;
+  url?: string;
   error?: string;
   progress?: number;
   exiting?: boolean;
@@ -136,11 +136,11 @@ export default function App() {
         return;
       }
 
-      // Start DSH and wait for port
+      // Start DSH and wait for its authenticated web URL
       try {
-        const port = await invoke<number>("start_dsh");
+        const url = await invoke<string>("start_dsh");
         if (cancelled) return;
-        setState({ status: "ready", message: "", port });
+        setState({ status: "ready", message: "", url });
       } catch (err) {
         if (cancelled) return;
         setState({
@@ -176,11 +176,13 @@ export default function App() {
       });
     }).catch(() => {});
 
-    // Listen for port-ready events (from existing process or fresh start)
-    listen<number>("dsh-port-ready", (event: Event<number>) => {
+    // Listen for web-URL events (from existing process or fresh start).
+    // dsh 0.1.2-rc.1 起带 launch-token 认证：必须加载后端传来的完整 URL
+    // （含 token，首次访问换取签名 cookie），裸地址会得到 401。
+    listen<string>("dsh-port-ready", (event: Event<string>) => {
       setState((prev) => {
         if (prev.status !== "ready" && prev.status !== "crashed") {
-          return { status: "ready", message: "", port: event.payload };
+          return { status: "ready", message: "", url: event.payload };
         }
         return prev;
       });
@@ -435,7 +437,7 @@ export default function App() {
       <TitleBar rightOffset={preview ? dockWidth : 0} />
       <div className="app ready">
         <iframe
-          src={`http://127.0.0.1:${state.port}`}
+          src={state.url}
           title="DeepSeek Harness"
           className="webview"
           ref={iframeRef}

@@ -91,10 +91,11 @@ fn probe_no_open(cli: &PathBuf, home: &PathBuf) -> bool {
     }
 }
 
-/// Start the DSH web server process and return the port.
+/// Start the DSH web server process and return the authenticated web URL
+/// （含 launch token；旧版 dsh 为裸 URL）。iframe 必须加载该 URL 才能通过认证。
 /// 直接 spawn bundle 内的 node 运行 lib/bin.js，不依赖系统 node / 系统 dsh。
 #[tauri::command]
-pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
+pub async fn start_dsh(app: tauri::AppHandle) -> Result<String, String> {
     log::info!("start_dsh called");
     let home = dsh_home();
     log::info!("DSH_HOME: {:?}", home);
@@ -149,15 +150,17 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
             if is_process_alive(pid) {
                 let port_file = home.join(".iyam-dsh.port");
-                if !needs_dsh_restart && port_file.exists() {
+                if !needs_dsh_restart && !core_version_mismatch(&home) && port_file.exists() {
                     if let Ok(port_str) = fs::read_to_string(&port_file) {
                         if let Ok(port) = port_str.trim().parse::<u16>() {
-                            let _ = app.emit("dsh-port-ready", port);
-                            return Ok(port);
+                            let url = stored_web_url(&home, port);
+                            let _ = app.emit("dsh-port-ready", url.clone());
+                            return Ok(url);
                         }
                     }
                 }
-                // 端口不可用，或插件集过期（needs_dsh_restart）→ 杀掉旧进程，走下方全新 spawn
+                // 端口不可用、插件集过期，或磁盘核心已升级而运行中的还是旧进程
+                //（promote 后的内存/磁盘错配）→ 杀掉旧进程，走下方全新 spawn
                 kill_process(pid);
             }
         }
@@ -243,11 +246,11 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
             .map(|m| m.len())
             .unwrap_or(0);
         match spawn_and_wait_port(&app, &mut cmd, &home, &pid_file) {
-            Ok(port) => {
+            Ok(url) => {
                 if !all_removed.is_empty() {
                     let _ = app.emit("dsh-plugins-auto-disabled", all_removed.clone());
                 }
-                return Ok(port);
+                return Ok(url);
             }
             Err(_) => {
                 let tail = read_stderr_tail(&home.join(".iyam-dsh-stderr.log"), stderr_len);
@@ -293,15 +296,61 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
     }
 }
 
+/// 从 dsh stdout 行解析 web 访问 URL（**含 launch token**）。
+///
+/// dsh 0.1.2-rc.1 起 web 服务带认证：stdout 打印
+/// `dsh web: http://127.0.0.1:<port>/?token=<t>`，首次带 token 访问 `/` 会换取签名
+/// cookie，之后凭 cookie 加载界面；裸 URL 一律 401（"authentication required"）。
+/// 旧版本打印的是无 token 裸 URL。统一取 `dsh web:` 后第一个空白分隔的 127.0.0.1
+/// URL（LAN URL 在括号内，不会被匹配）。
+fn parse_web_url(line: &str) -> Option<String> {
+    let re = Regex::new(r"dsh\s+web:\s+(http://127\.0\.0\.1:\d+\S*)").unwrap();
+    re.captures(line).map(|c| c[1].to_string())
+}
+
+/// 从 web URL 提取端口（写 `.iyam-dsh.port` 兼容既有流程）。
+fn port_of_url(url: &str) -> Option<u16> {
+    let re = Regex::new(r"http://127\.0\.0\.1:(\d+)").unwrap();
+    re.captures(url)?.get(1)?.as_str().parse::<u16>().ok()
+}
+
+/// 运行中 dsh（spawn 时记录在 `.iyam-dsh.version`）与当前磁盘核心版本是否不一致。
+///
+/// 升级提升发生在启动早期：若旧进程还活着（窗口关闭进托盘时 DSH 常驻后台），
+/// promote 后磁盘已是新版、旧进程仍以旧代码服务界面——旧格式 boot manifest
+/// （无 `batches`）与新版前端校验混搭，正是 "client-modules: boot manifest batches
+/// must be an array" 的来源。此时必须杀掉旧进程走全新 spawn，让内存与磁盘对齐。
+/// 版本记录缺失（升级前遗留的旧进程 / 旧版安装）同样强制重启一次。
+fn core_version_mismatch(home: &PathBuf) -> bool {
+    let recorded = fs::read_to_string(home.join(".iyam-dsh.version"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match dsh_core_version(home) {
+        Some(current) => recorded.as_deref() != Some(current.as_str()),
+        // 磁盘上读不到核心版本（残损安装），不在此处理，走后续正常启动流程。
+        None => false,
+    }
+}
+
+/// 读取已运行 dsh 的访问 URL（spawn 时落盘的带 token 地址）；缺失则退回裸 URL。
+fn stored_web_url(home: &PathBuf, port: u16) -> String {
+    fs::read_to_string(home.join(".iyam-dsh.url"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", port))
+}
+
 /// 启动 DSH 子进程并等待其打出端口行。
-/// 成功：完成端口落盘、子进程守护、市场弹窗等全部收尾，返回端口。
+/// 成功：完成 URL/port/版本落盘、子进程守护、市场弹窗等全部收尾，返回带 token 的访问 URL。
 /// 失败（超时/早退）：杀掉子进程并等 stderr 落盘，返回 `Err(())`。
 fn spawn_and_wait_port(
     app: &tauri::AppHandle,
     cmd: &mut Command,
     home: &PathBuf,
     pid_file: &PathBuf,
-) -> Result<u16, ()> {
+) -> Result<String, ()> {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -341,28 +390,31 @@ fn spawn_and_wait_port(
         Some(o) => o,
         None => return Err(()),
     };
-    let port_handle = std::thread::spawn(move || {
+    let url_handle = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
-        let re = Regex::new(r"dsh\s+web:\s+http://127\.0\.0\.1:(\d+)").unwrap();
         for line in reader.lines() {
             if let Ok(l) = line {
-                if let Some(cap) = re.captures(&l) {
-                    if let Some(m) = cap.get(1) {
-                        if let Ok(p) = m.as_str().parse::<u16>() {
-                            return Some(p);
-                        }
-                    }
+                if let Some(url) = parse_web_url(&l) {
+                    return Some(url);
                 }
             }
         }
         None
     });
 
-    match port_handle.join() {
-        Ok(Some(port)) => {
+    match url_handle.join() {
+        Ok(Some(url)) => {
+            let port = port_of_url(&url);
             crate::downloader::clear_applying(home);
-            fs::write(home.join(".iyam-dsh.port"), port.to_string()).ok();
-            let _ = app.emit("dsh-port-ready", port);
+            if let Some(p) = port {
+                fs::write(home.join(".iyam-dsh.port"), p.to_string()).ok();
+            }
+            fs::write(home.join(".iyam-dsh.url"), &url).ok();
+            // 记录本次 spawn 的核心版本：下次启动用于检测「磁盘已升级而进程还是旧版」
+            // 的错配，决定是否强制重启（见 core_version_mismatch）。
+            let core_ver = dsh_core_version(home).unwrap_or_default();
+            fs::write(home.join(".iyam-dsh.version"), core_ver).ok();
+            let _ = app.emit("dsh-port-ready", url.clone());
             {
                 let mut global = DSH_CHILD.lock().unwrap();
                 if let Some(old) = global.as_mut() {
@@ -385,7 +437,7 @@ fn spawn_and_wait_port(
                     let _ = exit_app.emit("dsh-process-exit", ());
                 }
             });
-            Ok(port)
+            Ok(url)
         }
         _ => {
             let _ = child.kill();
@@ -783,6 +835,7 @@ pub async fn stop_dsh() -> Result<(), String> {
     let home = dsh_home();
     fs::remove_file(home.join(".iyam-dsh.pid")).ok();
     fs::remove_file(home.join(".iyam-dsh.port")).ok();
+    fs::remove_file(home.join(".iyam-dsh.url")).ok();
     Ok(())
 }
 
@@ -859,6 +912,21 @@ Error: failed to import loader entry foo (@iyam/dsh-rtui-ui): boom
     fn parse_missing_packages_dedupes() {
         let text = "Cannot find package 'foo' \n x \n Cannot find package 'foo'";
         assert_eq!(parse_missing_packages(text), vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn parse_web_url_captures_token_and_ignores_lan() {
+        // 0.1.2-rc.1：带 token + LAN 尾注
+        let line = r#"dsh web: http://127.0.0.1:60830/?token=Ab12-_.x (LAN: http://192.168.1.5:60830/?token=Ab12-_.x)"#;
+        let url = parse_web_url(line).unwrap();
+        assert_eq!(url, "http://127.0.0.1:60830/?token=Ab12-_.x");
+        assert_eq!(port_of_url(&url), Some(60830));
+        // 旧版本：无 token 裸 URL
+        let old = parse_web_url("dsh web: http://127.0.0.1:5173").unwrap();
+        assert_eq!(old, "http://127.0.0.1:5173");
+        assert_eq!(port_of_url(&old), Some(5173));
+        // 无关行不匹配
+        assert!(parse_web_url("listening on http://127.0.0.1:1").is_none());
     }
 
     /// 临时目录里的迷你 DSH_HOME：profile 含第三方 dshmarket + 核心包，核心版本可写。

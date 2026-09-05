@@ -154,6 +154,7 @@ fn main() {
             let home = installer::dsh_home();
             let _ = std::fs::remove_file(home.join(".iyam-dsh.pid"));
             let _ = std::fs::remove_file(home.join(".iyam-dsh.port"));
+            let _ = std::fs::remove_file(home.join(".iyam-dsh.url"));
         }
     });
 }
@@ -184,6 +185,7 @@ mod tray_commands {
         let home = crate::installer::dsh_home();
         std::fs::remove_file(home.join(".iyam-dsh.pid")).ok();
         std::fs::remove_file(home.join(".iyam-dsh.port")).ok();
+        std::fs::remove_file(home.join(".iyam-dsh.url")).ok();
         start_dsh(app).await?;
         Ok(())
     }

@@ -4,6 +4,24 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.13] - 2026-09-05
+
+### 修复
+
+- **适配 dsh 0.1.2-rc.1 的 web 认证（launch token）**：该版本起 dsh web 全站认证，启动时
+  stdout 打印的地址带 `?token=...`，首次访问以 token 换取签名 cookie，裸地址一律 401。
+  此前 app 只解析端口、iframe 加载裸地址，升级后界面必然无法加载。现从 stdout 捕获完整
+  带 token 的 URL（`dsh web: http://127.0.0.1:<port>/?token=...`，LAN 尾注不匹配），落盘
+  `~/.dsh/.iyam-dsh.url` 并经 `dsh-port-ready` 事件传给前端，iframe 直接加载该地址；旧版
+  dsh（无 token 裸 URL）行为不变。`start_dsh` 返回值由端口号改为完整 URL。
+- **修复升级后「boot manifest batches must be an array」**：升级提升发生在启动早期，若旧
+  dsh 进程仍在后台常驻（窗口关闭进托盘），app 会复用旧进程——内存里是旧版 dsh、磁盘已是
+  新版，旧格式 boot manifest（无 `batches` 字段）被新版前端校验即报此错。现于 spawn 时把
+  核心版本记入 `~/.dsh/.iyam-dsh.version`，启动时检测「运行中进程版本 ≠ 磁盘版本」（含记
+  录缺失的升级遗留进程）即强制重启，保证内存与磁盘永远一致。
+- 本机端到端实测：token URL → 303 换 cookie → 200 加载界面，manifest 含 `batches`(2)/
+  `entries`(49)，裸 URL 401——新 dsh 完整可用。
+
 ## [0.2.12] - 2026-09-05
 
 ### 修复
