@@ -325,7 +325,9 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 | `dsh plugin remove <pkg>` | 完全可用 |
 | `dsh --profile web --help` | App 固定使用 web profile |
 | `DSH_HOME` 环境变量 | App 默认 `~/.dsh/`（与用户 npm i -g 一致），可被 `$DSH_HOME` 覆盖 |
-| dsh 内核升级 | App 菜单「检查更新」或手动 `npm update -g @deepseek-ai/dsh` |
+| dsh 内核升级 | App 始终备货 registry 最新版（不再设兼容上限），下次启动生效；失败自动回滚，不兼容第三方插件自动隔离 |
+| dsh web 认证（≥ 0.1.2-rc.1） | token 直取 index + API 回环放行（两处幂等补丁，见问题记录 13/14） |
+| 内置插件适配 | rtui-ui 走 seed 模块 `dsh-client-store`；file-handler 的 openPath 拦截点被上游移除、暂降级（问题记录 15） |
 | Agent Presets | 读取 `~/.dsh/.agent-presets/`，完整保留 |
 | Cordis 插件系统 | 完整保留，无感知 |
 
@@ -457,3 +459,53 @@ GitHub Actions / Gitee Go 按上述步骤自动构建并上传 Releases；需在
 - **修复**：`ensure_picker_owner_patch` 改为递归遍历 `DSH_HOME/node_modules` 下**所有** `dsh-host-directory-picker-native/lib/worker.cjs` 一并打补丁（幂等、跳符号链接防环、限深 24）。
 - **经验**：给 DSH 第三方文件打补丁前，先 `grep`/解析确认"运行时真正加载的是哪一份"——存在 npm 嵌套副本时，只改一处会以为生效实则没改到。
 
+
+### 14. dsh 0.1.2-rc.1 web 认证：跨源 iframe 存不下 SameSite=Strict cookie（2026-09-05）
+
+- **症状**：升级 dsh 后 iframe 显示 `dsh web authentication required`；0.2.13 改为加载带
+  `?token=` 的 URL 后仍 401。
+- **根因**：0.1.2-rc.1 给 dsh web 加了全站认证——stdout 打印的 URL 带 `?token=`，首次访问
+  以 token 换签名 cookie（`HttpOnly; SameSite=Strict`），之后凭 cookie 访问。但本 app 的
+  DSH 界面运行在 `tauri://localhost` 顶层的**跨源 iframe**（`http://127.0.0.1:<port>`）里，
+  WebKit 按第三方 cookie 处理：**cookie 既存不下也发不出**，token 换 cookie 的路径在
+  webview 中必然 401。认证有两层：index（`authorizeIndex`）与 `/api`+WS
+  （`requestRejection`），都要处理。
+- **修复**：按 picker 补丁同模式对 `dsh-client-connection/lib/index.js`（顶层 + 核心内嵌
+  两份副本）打两处幂等补丁——① token 校验通过直接返回 index（不 303 换 cookie）；
+  ② `/api` 认证对 **TCP 回环对端**放行（`req.socket.remoteAddress` 是传输层事实、不可
+  伪造；Host/Origin fence 保留在前挡 DNS rebinding；局域网仍需 cookie）。补丁刚生效时
+  强制重启 DSH，让内存代码与磁盘一致。
+- **经验**：① 上游新增认证时，先找全**所有**认证面（index / API / WS），只适配一处会
+  留下"页面能开但接口全挂"的半成品；② webview 里跨源 iframe 的 cookie 不可依赖
+  （SameSite=Strict + 第三方拦截双重限制），凡是"token 换 cookie"类设计都要准备无 cookie
+  路径；③ 补丁幂等 + 变化时强制重启，否则运行中的旧进程让补丁"看起来生效了"。
+
+### 15. 升级提升后复用旧进程 → 新旧混搭「boot manifest batches must be an array」（2026-09-05）
+
+- **症状**：升级 dsh 后界面报 `client-modules: boot manifest batches must be an array`。
+- **根因**：升级提升（promote）发生在启动早期，若旧 dsh 进程仍在后台常驻（关窗口进托盘
+  不退出），`start_dsh` 会**复用旧进程**——内存里是旧版 dsh（吐旧格式 boot manifest，无
+  `batches` 字段），磁盘与前端已是新版，新校验一跑即崩。
+- **修复**：spawn 成功时把核心版本记入 `~/.dsh/.iyam-dsh.version`；启动时检测「运行中进程
+  版本 ≠ 磁盘版本」（含记录缺失的升级遗留进程）即杀掉旧进程全新 spawn。
+- **经验**：凡"先替换磁盘、后决定是否复用进程"的流程，必须显式对齐**内存与磁盘版本**；
+  进程复用的判定条件里永远要包含版本一致性。
+
+### 16. dsh 插件 API 演进：client-runtime 移除、第三方插件拖垮启动（2026-09-05）
+
+- **症状**：① 内置主题插件报 `require("@deepseek-ai/dsh-client-runtime/client") missed the
+  module table`；② 第三方插件（dshmarket 1.20.0）引用被移除的导出，整棵 dsh 启动崩溃。
+- **根因**：dsh 0.1.2-rc.1 移除 `@deepseek-ai/dsh-client-runtime` 包，`defineStore` 改由
+  内核 seed 模块 `@deepseek-ai/dsh-client-store` 提供（`{ init, actions }` 契约不变）；同
+  版本还移除了 `dsh-settings` 的 `installSettingsSection` 导出。dsh 的客户端/插件 API 演进
+  频繁，静态依赖内部包随时会断。
+- **修复**：① 内置插件统一改为「优先新 seed 模块、回退旧包、全程 try/catch 降级」——
+  `@iyam/*` 被隔离机制保护、无法被禁用，自身绝不能成为拖垮启动的肇事者；② 启动失败时从
+  stderr 解析肇事第三方插件（`failed to import loader entry` 汇总行 + 栈内 `node_modules`
+  路径），只禁用肇事者重试，点不出则禁用全部第三方插件兜底；被禁插件记入
+  `~/.dsh/.quarantine.json`，dsh 版本变化后自动恢复重试。更新目标不再设兼容上限——分层
+  自愈（隔离/回滚）保证可用性，而非拦截版本。
+- **经验**：① dsh 的内部导出/包随时会移除，内置插件的 require 一律走「新路径 → 旧路径 →
+  降级」链，绝不静态依赖易变内部包；② 兼容性问题靠**隔离与自愈**兜底比靠「版本上限」更
+  可持续——上限会把用户永久卡在旧版；③ 解析 dsh 崩溃日志时，`failed to import loader
+  entry <id> (<pkg>)` 与栈内 `node_modules/...` 路径能直接点名肇事插件。
