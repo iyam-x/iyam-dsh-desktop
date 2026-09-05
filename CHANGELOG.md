@@ -4,6 +4,20 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.14] - 2026-09-05
+
+### 修复
+
+- **webview 中仍提示 `dsh web authentication required`（0.2.13 遗留）**：dsh 的签名 cookie
+  带 `HttpOnly; SameSite=Strict`，而 app 的 DSH 界面运行在 `tauri://localhost` 顶层的跨源
+  iframe 里——WebKit 将其按第三方 cookie 处理，cookie 既存不下也发不出，0.2.13 的「加载
+  token URL 换 cookie」路径在 webview 中必然再次 401。现按项目既有上游补丁模式（同
+  picker-owner 补丁）把 `dsh-client-connection` 的「token 换 cookie 后 303 重定向」改为
+  「token 校验通过直接返回 index」，界面加载全程无需 cookie；token 仍是访问凭据（裸地址
+  依旧 401），安全语义不变。补丁幂等应用于顶层与核心内嵌两份副本，升级 dsh 还原文件后
+  每次启动自动重补；补丁刚生效时强制重启 DSH 让内存代码与磁盘一致。
+  - 本机实测：补丁后带 token URL 直接 200 返回界面（含 `__DSH_BOOT__`），裸地址仍 401。
+
 ## [0.2.13] - 2026-09-05
 
 ### 修复

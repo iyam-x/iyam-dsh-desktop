@@ -872,6 +872,88 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 const PICKER_OWNER_PATCHED: &str =
     "const _h = process.env.DSH_DIALOG_OWNER_HWND; let _o = null; if (_h && /^[0-9]+$/.test(_h)) { const _n = Number(_h); if (_n > 0 && _n <= 0x7fffffff) { _o = _n; } }";
 
+/// dsh 0.1.2-rc.1 web 认证的 webview 适配补丁：把「token 换 cookie 后 303 重定向」
+/// 改为「token 校验通过直接返回 index」。
+///
+/// 背景：dsh 的签名 cookie 带 `HttpOnly; SameSite=Strict`，而本 app 的 DSH 界面运行在
+/// `tauri://localhost` 顶层的跨源 iframe（http://127.0.0.1:<port>）里——WebKit 按
+/// 第三方 cookie 处理，Strict cookie 既存不下也发不出，303 换 cookie 的路径在
+/// webview 中永远 401。改为 token 直取 index 后无需 cookie（仅 `/` 受认证保护，
+/// 资产与 /api 走 Host/Origin fence）；token 仍是访问凭据，安全语义不变。
+const WEB_AUTH_FROM: &str = concat!(
+    "const issuedAt = Date.now();\n",
+    "\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n",
+    "\t\t\t\tconst value = encodeCookie({\n",
+    "\t\t\t\t\tversion: COOKIE_PAYLOAD_VERSION,\n",
+    "\t\t\t\t\tauthority,\n",
+    "\t\t\t\t\tissuedAt,\n",
+    "\t\t\t\t\texpiresAt\n",
+    "\t\t\t\t}, this.secret);\n",
+    "\t\t\t\tres.writeHead(303, {\n",
+    "\t\t\t\t\t\"cache-control\": \"no-store\",\n",
+    "\t\t\t\t\t\"location\": \"/\",\n",
+    "\t\t\t\t\t\"referrer-policy\": \"no-referrer\",\n",
+    "\t\t\t\t\t\"set-cookie\": sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3))\n",
+    "\t\t\t\t});\n",
+    "\t\t\t\tres.end();\n",
+    "\t\t\t\treturn false;"
+);
+const WEB_AUTH_TO: &str =
+    "return true; /* iyam-dsh web-auth patch: valid token serves index directly */";
+
+/// 为 dsh-client-connection 打 token 直取补丁（幂等）。
+/// 返回是否有文件被实际修改——调用方据此判断运行中的旧进程需要重启才能生效。
+///
+/// dsh-client-connection 有两份（npm 全局提升的顶层副本 + dsh 核心包内嵌套副本），
+/// 加载器解析到哪份不确定，两份都补。升级 dsh 会还原成未补丁文件，每次启动幂等重补。
+pub(crate) fn ensure_web_auth_patch(home: &PathBuf) -> bool {
+    let nm = dsh_node_modules(home);
+    let targets = [
+        nm.join("@deepseek-ai")
+            .join("dsh-client-connection")
+            .join("lib")
+            .join("index.js"),
+        nm.join("@deepseek-ai")
+            .join("dsh")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh-client-connection")
+            .join("lib")
+            .join("index.js"),
+    ];
+    let mut changed = false;
+    for target in &targets {
+        let Ok(content) = fs::read_to_string(&target) else {
+            continue; // 该副本不存在（安装布局差异/未升级），跳过
+        };
+        if content.contains(WEB_AUTH_TO) || !content.contains(WEB_AUTH_FROM) {
+            continue; // 已补丁，或上游结构变化（打不上则记录告警）
+        }
+        let patched = content.replacen(WEB_AUTH_FROM, WEB_AUTH_TO, 1);
+        match fs::write(&target, patched) {
+            Ok(()) => {
+                log::info!("已为 dsh web 认证打 token 直取补丁: {}", target.display());
+                changed = true;
+            }
+            Err(e) => log::warn!("写 web 认证补丁失败({}): {e}", target.display()),
+        }
+    }
+    if !changed {
+        // 两份都不存在或都已打上属正常；结构变化时给出可见告警（参照 picker 补丁的约定）
+        let primary = targets.first().map(|p| p.exists()).unwrap_or(false);
+        if primary {
+            let patched = std::fs::read_to_string(targets[0].clone())
+                .map(|c| c.contains(WEB_AUTH_TO))
+                .unwrap_or(false);
+            if !patched {
+                log::warn!(
+                    "dsh-client-connection 结构变化，未打 web 认证补丁（引擎升级后需同步；界面可能无法在 webview 中加载）"
+                );
+            }
+        }
+    }
+    changed
+}
 /// 给单个 `dsh-host-directory-picker-native/lib/worker.cjs` 打 owner 补丁（幂等）。
 /// DSH 选目录对话框以主窗口 HWND 为 owner → 不占独立任务栏按钮、图标继承应用。
 fn patch_picker_worker_file(worker: &PathBuf) {

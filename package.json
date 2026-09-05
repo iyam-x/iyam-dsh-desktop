@@ -1,6 +1,6 @@
 {
   "name": "iyam-dsh-desktop",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "description": "DeepSeek Harness Desktop App",
   "type": "module",
   "scripts": {

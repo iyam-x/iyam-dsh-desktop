@@ -116,6 +116,11 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<String, String> {
     // 新版 dsh 下插件可能已适配；若仍不兼容，下方启动重试会再次隔离它。
     reinstate_quarantined(&home, false);
 
+    // 适配 dsh web 认证（token 直取 index，见 installer::ensure_web_auth_patch）。
+    // 每次启动幂等重补（升级 dsh 会还原文件）；补丁刚有变化时下方不再复用旧进程，
+    // 强制全新 spawn 让内存代码与磁盘一致。
+    let web_auth_patched = crate::installer::ensure_web_auth_patch(&home);
+
     // 启动 dsh CLI：`cli` 已是真实 `bin.js` 路径（托管态用托管 node 跑，系统态用 OS node 跑）。
     let cli = detect_dsh_cli().ok_or("未找到 dsh 命令，请检查安装或网络后重试。")?;
 
@@ -150,7 +155,9 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<String, String> {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
             if is_process_alive(pid) {
                 let port_file = home.join(".iyam-dsh.port");
-                if !needs_dsh_restart && !core_version_mismatch(&home) && port_file.exists() {
+                if !needs_dsh_restart && !core_version_mismatch(&home) && !web_auth_patched
+                    && port_file.exists()
+                {
                     if let Ok(port_str) = fs::read_to_string(&port_file) {
                         if let Ok(port) = port_str.trim().parse::<u16>() {
                             let url = stored_web_url(&home, port);
