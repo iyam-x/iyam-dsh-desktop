@@ -901,7 +901,26 @@ const WEB_AUTH_FROM: &str = concat!(
 const WEB_AUTH_TO: &str =
     "return true; /* iyam-dsh web-auth patch: valid token serves index directly */";
 
-/// 为 dsh-client-connection 打 token 直取补丁（幂等）。
+/// API 认证补丁：`/api`（含 WebSocket 升级）的 401 同源问题——`requestRejection` 对所有
+/// API 请求做 cookie 校验，而跨源 iframe 存不下 Strict cookie。对 **TCP 回环对端**放行：
+/// `req.socket.remoteAddress` 是传输层事实、无法在 HTTP 层伪造；局域网请求（非回环）仍需
+/// cookie，DNS rebinding 仍被前置的 Host/Origin fence（403）拦截。本机其他进程本就可经
+/// token URL 获得同等访问权，信任级别不变。
+const WEB_AUTH_API_FROM: &str = concat!(
+    "requestRejection(request) {\n",
+    "\t\tif (!isTrustedApiRequest(request, this.trustedHosts)) return 403;\n",
+    "\t\treturn this.browserAuth.isAuthenticated(request) ? void 0 : 401;\n",
+    "\t}"
+);
+const WEB_AUTH_API_TO: &str = concat!(
+    "requestRejection(request) {\n",
+    "\t\tif (!isTrustedApiRequest(request, this.trustedHosts)) return 403;\n",
+    "\t\ttry { const _ra = request.socket && request.socket.remoteAddress; if (_ra === \"127.0.0.1\" || _ra === \"::1\" || _ra === \"::ffff:127.0.0.1\") return void 0; } catch (_) {}\n",
+    "\t\treturn this.browserAuth.isAuthenticated(request) ? void 0 : 401;\n",
+    "\t} /* iyam-dsh api-auth patch: loopback peers exempted from cookie auth */"
+);
+
+/// 为 dsh-client-connection 打 webview 认证适配补丁（幂等，见上方两处说明）。
 /// 返回是否有文件被实际修改——调用方据此判断运行中的旧进程需要重启才能生效。
 ///
 /// dsh-client-connection 有两份（npm 全局提升的顶层副本 + dsh 核心包内嵌套副本），
@@ -921,31 +940,41 @@ pub(crate) fn ensure_web_auth_patch(home: &PathBuf) -> bool {
             .join("lib")
             .join("index.js"),
     ];
+    let patches: [(&str, &str); 2] = [
+        (WEB_AUTH_FROM, WEB_AUTH_TO),
+        (WEB_AUTH_API_FROM, WEB_AUTH_API_TO),
+    ];
     let mut changed = false;
     for target in &targets {
-        let Ok(content) = fs::read_to_string(&target) else {
+        let Ok(content) = fs::read_to_string(target) else {
             continue; // 该副本不存在（安装布局差异/未升级），跳过
         };
-        if content.contains(WEB_AUTH_TO) || !content.contains(WEB_AUTH_FROM) {
-            continue; // 已补丁，或上游结构变化（打不上则记录告警）
-        }
-        let patched = content.replacen(WEB_AUTH_FROM, WEB_AUTH_TO, 1);
-        match fs::write(&target, patched) {
-            Ok(()) => {
-                log::info!("已为 dsh web 认证打 token 直取补丁: {}", target.display());
-                changed = true;
+        let mut current = content;
+        let mut touched = false;
+        for (from, to) in patches {
+            if current.contains(to) || !current.contains(from) {
+                continue; // 已补丁，或上游结构变化
             }
-            Err(e) => log::warn!("写 web 认证补丁失败({}): {e}", target.display()),
+            current = current.replacen(from, to, 1);
+            touched = true;
+        }
+        if touched {
+            match fs::write(target, current) {
+                Ok(()) => {
+                    log::info!("已为 dsh web 认证打适配补丁: {}", target.display());
+                    changed = true;
+                }
+                Err(e) => log::warn!("写 web 认证补丁失败({}): {e}", target.display()),
+            }
         }
     }
     if !changed {
         // 两份都不存在或都已打上属正常；结构变化时给出可见告警（参照 picker 补丁的约定）
-        let primary = targets.first().map(|p| p.exists()).unwrap_or(false);
-        if primary {
-            let patched = std::fs::read_to_string(targets[0].clone())
-                .map(|c| c.contains(WEB_AUTH_TO))
+        if let Some(primary) = targets.first() {
+            let patched = fs::read_to_string(primary)
+                .map(|c| c.contains(WEB_AUTH_TO) && c.contains(WEB_AUTH_API_TO))
                 .unwrap_or(false);
-            if !patched {
+            if primary.exists() && !patched {
                 log::warn!(
                     "dsh-client-connection 结构变化，未打 web 认证补丁（引擎升级后需同步；界面可能无法在 webview 中加载）"
                 );

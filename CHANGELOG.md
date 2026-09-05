@@ -4,6 +4,28 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.15] - 2026-09-05
+
+### 修复
+
+- **界面加载后 `/api` 全部 401、WebSocket 连不上**：`/api`（含 `remote.mux` WS 升级）走的是
+  另一条 cookie 认证链路（`requestRejection`），与 index 的 token 补丁不同源——跨源 iframe
+  依旧没有 cookie。现扩展 web 认证补丁：Host/Origin fence（防 DNS rebinding）保留在前，
+  其后对 **TCP 回环对端**（`req.socket.remoteAddress`，传输层事实、不可伪造）放行 cookie
+  校验；局域网请求仍需认证，安全语义不变。
+- **主题插件停用（`require dsh-client-runtime missed the module table`）**：dsh 0.1.2-rc.1
+  移除了 `@deepseek-ai/dsh-client-runtime` 包，`defineStore` 改由内核 seed 模块
+  `@deepseek-ai/dsh-client-store` 提供（`{ init, actions }` 契约不变）。`dsh-rtui-ui` 改为
+  优先 require 新 seed 模块、旧版 dsh 回退旧 runtime；三个内置插件的 `dsh.client.inject`
+  声明同步更新。
+
+### 已知问题
+
+- `dsh-file-handler`（文件内联预览）在 dsh 0.1.2-rc.1 上暂不可用：其拦截点
+  `ctx.workspaces.openPath` / `api.host.openPath` 客户端服务已被上游移除（仅存 node 侧
+  实现），需基于新 UI 的文件打开链路重新适配。插件按设计优雅降级（仅告警，不影响启动），
+  旧版 dsh 上功能不受影响。
+
 ## [0.2.14] - 2026-09-05
 
 ### 修复

@@ -13,18 +13,25 @@ window.__ModuleLoader__.load({
   factory: (require) => {
     const module = { exports: {} };
     const exports = module.exports;
-    // react / dsh-client-runtime 依赖预加载缺失或 API 变化时，插件降级为 no-op，
+    // react / store 依赖预加载缺失或 API 变化时，插件降级为 no-op，
     // 绝不让 require 抛错沿 ModuleLoader 传播、拖垮整个 web UI。
-    let react, runtime;
+    // dsh 0.1.2-rc.1：@deepseek-ai/dsh-client-runtime 被移除，defineStore 改由内核
+    // seed 模块 @deepseek-ai/dsh-client-store 提供（{ init, actions } 契约不变）；
+    // 旧版 dsh 无该 seed，回退旧 runtime。
+    let react, storeMod;
     try {
       react = require("react");
-      runtime = require("@deepseek-ai/dsh-client-runtime/client");
+      storeMod = require("@deepseek-ai/dsh-client-store");
     } catch (e) {
-      console.warn("[iyam/dsh-rtui-ui] 客户端依赖不可用，主题插件已停用:", e);
-      return { apply() {}, inject: [] };
+      try {
+        storeMod = require("@deepseek-ai/dsh-client-runtime/client");
+      } catch (_e) {
+        console.warn("[iyam/dsh-rtui-ui] 客户端依赖不可用，主题插件已停用:", e);
+        return { apply() {}, inject: [] };
+      }
     }
     const h = react.createElement;
-    const { defineStore } = runtime;
+    const { defineStore } = storeMod;
 
     // ── 调色板：每套预设给出 light/dark 语义色 ──
     // 字段: bg/layer1-3 背景分层, label/label2/label3/caption/dimmed 文字,

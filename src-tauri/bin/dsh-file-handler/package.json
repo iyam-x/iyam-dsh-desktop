@@ -17,7 +17,7 @@
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-runtime"]
+      "inject": ["@deepseek-ai/dsh-client-store"]
     }
   }
 }
