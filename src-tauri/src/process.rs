@@ -111,6 +111,10 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         log::warn!("refresh dsh core failed: {}", e);
     }
 
+    // dsh 版本已变化（刚升级）时，把上次因不兼容被禁用的第三方插件加回来重试：
+    // 新版 dsh 下插件可能已适配；若仍不兼容，下方启动重试会再次隔离它。
+    reinstate_quarantined(&home, false);
+
     // 启动 dsh CLI：`cli` 已是真实 `bin.js` 路径（托管态用托管 node 跑，系统态用 OS node 跑）。
     let cli = detect_dsh_cli().ok_or("未找到 dsh 命令，请检查安装或网络后重试。")?;
 
@@ -228,7 +232,7 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    // 启动并等待端口；失败则自愈（自动剥离加载失败的插件）后重试，最多 3 轮。
+    // 启动并等待端口；失败则自愈（自动剥离不兼容/损坏的插件）后重试，最多 3 轮。
     let max_retries = 3;
     let mut all_removed: Vec<String> = Vec::new();
     let mut attempt = 0;
@@ -248,27 +252,42 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<u16, String> {
             Err(_) => {
                 let tail = read_stderr_tail(&home.join(".iyam-dsh-stderr.log"), stderr_len);
                 let missing = parse_missing_packages(&tail);
-                // 无插件可剥离，或已达重试上限：回滚升级（若适用）并报真实错误
-                if missing.is_empty() || attempt >= max_retries {
-                    if crate::downloader::rollback_after_failure(&home) {
-                        let _ = app.emit("dsh-update-failed", ());
+                let named = parse_broken_plugins(&tail);
+                // stderr 点得出具体插件（链接错误 / 缺包）→ 只剥肇事者，重试。
+                if attempt < max_retries && (!missing.is_empty() || !named.is_empty()) {
+                    let removed = quarantine_broken_plugins(&home, &missing, &named);
+                    if !removed.is_empty() {
+                        log::warn!(
+                            "DSH 启动失败，自动禁用 {} 个不兼容插件: {}",
+                            removed.len(),
+                            removed.join(", ")
+                        );
+                        all_removed.extend(removed);
+                        continue;
                     }
-                    return Err(real_start_error(&tail, &all_removed));
                 }
-                let removed = quarantine_broken_plugins(&home, &missing);
-                if removed.is_empty() {
-                    if crate::downloader::rollback_after_failure(&home) {
-                        let _ = app.emit("dsh-update-failed", ());
+                // 点不出具体插件（导出移除等疑难报错）→ 最后一搏：剥离全部第三方插件，
+                // 保证 DSH 一定能起来（app 可用优先；被禁插件记录在案、待适配后自动恢复）。
+                if attempt < max_retries && missing.is_empty() && named.is_empty() {
+                    let removed = quarantine_all_third_party(&home);
+                    if !removed.is_empty() {
+                        log::warn!(
+                            "无法定位故障插件，已禁用全部第三方插件重试: {}",
+                            removed.join(", ")
+                        );
+                        all_removed.extend(removed);
+                        continue;
                     }
-                    return Err(real_start_error(&tail, &all_removed));
                 }
-                log::warn!(
-                    "DSH 启动失败，自动禁用 {} 个无法加载的插件: {}",
-                    removed.len(),
-                    removed.join(", ")
-                );
-                all_removed.extend(removed);
-                // 继续循环重试（已写回 profiles/web/package.json）
+                // 无计可施：回滚本次升级（若适用），并自动用回滚后的版本重启一次，
+                // 保证 app 立刻恢复可用（回滚会把状态置为 failed，递归最多一层、不会死循环）。
+                if crate::downloader::rollback_after_failure(&home) {
+                    let _ = app.emit("dsh-update-failed", ());
+                    log::warn!("已回滚升级，自动以回滚后的版本重启 DSH");
+                    // 递归 async fn 需 Box::pin 引入间接层（回滚状态机保证只递归一层）。
+                    return Box::pin(start_dsh(app)).await;
+                }
+                return Err(real_start_error(&tail, &all_removed));
             }
         }
     }
@@ -393,6 +412,45 @@ fn parse_missing_packages(text: &str) -> Vec<String> {
     out
 }
 
+/// 从一段 stderr 文本里解析出「插件树加载失败」的肇事第三方插件（去重、保序）。
+///
+/// 背景：dsh 升级常移除内部导出（如 0.1.2-rc.1 移除 `installSettingsSection`），
+/// 第三方插件的静态 import 在 ESM 链接期即失败，整棵 dsh 启动崩溃。这类错误
+/// 不是 `Cannot find package`，需要单独识别。两种线索：
+/// 1. dsh-app-boot 的汇总行：`failed to import loader entry <id> (<pkg>): ...`
+///    （如 `failed to import loader entry dsh-market (dshmarket): ...`）；
+/// 2. 栈里的文件路径（ESM 一律 file:// URL）：`.../node_modules/[.pnpm/<x>/node_modules/]<pkg>/...`，
+///    过滤 `@deepseek-ai/*`、`@iyam/*`、`node:` 等核心/内部模块后即为第三方插件。
+fn parse_broken_plugins(text: &str) -> Vec<String> {
+    let entry_re = Regex::new(r"failed to import loader entry \S+ \(([^)]+)\)").unwrap();
+    // node_modules 可能有一层 .pnpm/<pkg>@<ver>_.../node_modules/ 中间段，取最后一段的包名。
+    let path_re = Regex::new(
+        r"node_modules/(?:\.pnpm/[^/\s:)]+/node_modules/)?((?:@[^/:\s)]+/)?[^/:\s)]+)",
+    )
+    .unwrap();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for cap in entry_re.captures_iter(text) {
+        let pkg = cap[1].to_string();
+        if pkg.starts_with("node:") || is_core_bundle(&pkg) {
+            continue;
+        }
+        if seen.insert(pkg.clone()) {
+            out.push(pkg);
+        }
+    }
+    for cap in path_re.captures_iter(text) {
+        let pkg = cap[1].to_string();
+        if pkg.starts_with("node:") || is_core_bundle(&pkg) {
+            continue;
+        }
+        if seen.insert(pkg.clone()) {
+            out.push(pkg);
+        }
+    }
+    out
+}
+
 /// 读取 stderr 日志从指定字节偏移到末尾（只取本次启动新增部分）。
 fn read_stderr_tail(path: &PathBuf, from: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
@@ -410,8 +468,11 @@ fn read_stderr_tail(path: &PathBuf, from: u64) -> String {
 }
 
 /// 核心 bundle 永不自动剥离，避免把 DSH / 内置插件搞挂。
+/// 注意：dshmarket 等市场安装的第三方插件**不在保护之列**——它们恰是 dsh 升级后
+/// 最常见的启动崩溃源（如 0.1.2-rc.1 移除 `installSettingsSection` 后 dshmarket 1.20.0
+/// 链接失败拖垮整棵 DSH），必须允许被隔离。
 fn is_core_bundle(name: &str) -> bool {
-    name.starts_with("@iyam/") || name.starts_with("@deepseek-ai/") || name == "dshmarket"
+    name.starts_with("@iyam/") || name.starts_with("@deepseek-ai/")
 }
 
 /// 判断某个已安装 bundle 的成员（dsh.bundles / dependencies）是否包含缺失包。
@@ -457,9 +518,12 @@ fn bundle_references_missing(
     names.iter().any(|n| missing.contains(n.as_str()))
 }
 
-/// 把 `profiles/web/package.json` 中「声明了却没装进 node_modules」或「成员包缺失」的非核心
-/// bundle / 依赖自动剥离（核心包除外）。返回被移除的条目名，供通知用户。
-fn quarantine_broken_plugins(home: &PathBuf, missing: &[String]) -> Vec<String> {
+/// 把 `profiles/web/package.json` 中确认损坏的非核心 bundle / 依赖自动剥离（核心包除外）。
+/// 判定来源（满足其一即剥离）：
+/// - `named`：stderr 里被点名的肇事插件（链接错误 / 栈路径解析，见 `parse_broken_plugins`）；
+/// - 声明了却没装进 node_modules、或其成员包缺失（`missing` 推断，ERR_MODULE_NOT_FOUND 类）。
+/// 返回被移除的条目名，供通知用户。
+fn quarantine_broken_plugins(home: &PathBuf, missing: &[String], named: &[String]) -> Vec<String> {
     let profile = home.join("profiles").join("web").join("package.json");
     let content = match fs::read_to_string(&profile) {
         Ok(c) => c,
@@ -470,6 +534,7 @@ fn quarantine_broken_plugins(home: &PathBuf, missing: &[String]) -> Vec<String> 
         Err(_) => return Vec::new(),
     };
     let missing_set: std::collections::HashSet<&str> = missing.iter().map(|s| s.as_str()).collect();
+    let named_set: std::collections::HashSet<&str> = named.iter().map(|s| s.as_str()).collect();
     let mut removed: Vec<String> = Vec::new();
     for field in ["bundles", "dependencies"] {
         let arr = match doc
@@ -487,8 +552,17 @@ fn quarantine_broken_plugins(home: &PathBuf, missing: &[String]) -> Vec<String> 
                 if is_core_bundle(name) {
                     continue;
                 }
-                let installed = home.join("node_modules").join(name).exists();
-                let strip = !installed
+                // 安装位置有两处：顶层依赖树（unix 为 lib/node_modules）与 profile 目录
+                // （`dsh plugin add` 装到 profiles/web/node_modules）。任一存在即算已装。
+                let installed = crate::installer::dsh_node_modules(home).join(name).exists()
+                    || home
+                        .join("profiles")
+                        .join("web")
+                        .join("node_modules")
+                        .join(name)
+                        .exists();
+                let strip = named_set.contains(name)
+                    || !installed
                     || missing_set.contains(name)
                     || bundle_references_missing(home, name, &missing_set);
                 if strip {
@@ -507,8 +581,169 @@ fn quarantine_broken_plugins(home: &PathBuf, missing: &[String]) -> Vec<String> 
         if let Ok(s) = serde_json::to_string_pretty(&doc) {
             let _ = fs::write(&profile, s);
         }
+        record_quarantine(home, &removed);
     }
     removed
+}
+
+/// 兜底隔离：剥离 profile 里**全部**非核心第三方 bundle / 依赖（保留 `@deepseek-ai/*`
+/// 与 `@iyam/*`）。用于启动失败但 stderr 点不出具体插件的场景——此时无法定位肇事者，
+/// 优先保证 DSH 能起来（app 可用），被禁插件经通知告知用户、待 dsh 版本变化自动恢复。
+/// 返回被移除的条目名。
+fn quarantine_all_third_party(home: &PathBuf) -> Vec<String> {
+    let profile = home.join("profiles").join("web").join("package.json");
+    let content = match fs::read_to_string(&profile) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut doc: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut removed: Vec<String> = Vec::new();
+    for field in ["bundles", "dependencies"] {
+        let arr = match doc
+            .get_mut("dsh")
+            .and_then(|d| d.get_mut("profile"))
+            .and_then(|p| p.get_mut(field))
+            .and_then(|a| a.as_array_mut())
+        {
+            Some(a) => a,
+            None => continue,
+        };
+        let mut to_remove = Vec::new();
+        for (i, item) in arr.iter().enumerate() {
+            if let Some(name) = item.as_str() {
+                if !is_core_bundle(name) {
+                    to_remove.push(i);
+                }
+            }
+        }
+        for i in to_remove.into_iter().rev() {
+            let v = arr.remove(i);
+            if let Some(s) = v.as_str() {
+                removed.push(s.to_string());
+            }
+        }
+    }
+    if !removed.is_empty() {
+        if let Ok(s) = serde_json::to_string_pretty(&doc) {
+            let _ = fs::write(&profile, s);
+        }
+        record_quarantine(home, &removed);
+    }
+    removed
+}
+
+/// 把本次被禁用的插件合并记录到 `<home>/.quarantine.json`，并附上当前 dsh 版本。
+/// 供「dsh 版本变化后自动恢复重试」（`reinstate_quarantined`）与回滚时还原。
+fn record_quarantine(home: &PathBuf, removed: &[String]) {
+    let path = home.join(".quarantine.json");
+    let mut doc: serde_json::Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({ "disabled": [] }));
+    let disabled = doc["disabled"].as_array_mut();
+    let Some(disabled) = disabled else { return };
+    for name in removed {
+        if !disabled.iter().any(|v| v.as_str() == Some(name)) {
+            disabled.push(serde_json::Value::String(name.to_string()));
+        }
+    }
+    doc["dsh_version"] = match dsh_core_version(home) {
+        Some(v) => serde_json::Value::String(v),
+        None => serde_json::Value::Null,
+    };
+    if let Ok(s) = serde_json::to_string_pretty(&doc) {
+        let _ = fs::write(&path, s);
+    }
+}
+
+/// 当前 dsh 核心包版本（读 `<core>/package.json`）；不可解析返回 None。
+fn dsh_core_version(home: &PathBuf) -> Option<String> {
+    crate::downloader::package_version(&crate::installer::dsh_core_dir(home))
+}
+
+/// 恢复此前因不兼容被禁用的第三方插件（重新加回 profile bundles，幂等）。
+/// `downloader::rollback_after_failure` 回滚时会以 force 调用，故为 pub(crate)。
+///
+/// 两种触发：
+/// - `force=true`：升级失败回滚后调用——回滚即恢复到升级前的兼容组合，全部还原；
+/// - `force=false`：每次启动调用——记录时的 dsh 版本与当前不同（已升级）才恢复，
+///   新版 dsh 下插件可能已适配；若仍不兼容，会再次启动失败并被重新隔离。
+pub(crate) fn reinstate_quarantined(home: &PathBuf, force: bool) {
+    let path = home.join(".quarantine.json");
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let doc: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let disabled: Vec<String> = doc["disabled"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if disabled.is_empty() {
+        let _ = fs::remove_file(&path);
+        return;
+    }
+    if !force {
+        let recorded = doc["dsh_version"].as_str();
+        let current = dsh_core_version(home);
+        // 版本未知（core 尚未就绪 / 记录时无版本）不轻举妄动；同版本也不必重试。
+        match (recorded, current) {
+            (Some(a), Some(b)) if a != b => {}
+            _ => return,
+        }
+    }
+    let profile = home.join("profiles").join("web").join("package.json");
+    let Ok(content) = fs::read_to_string(&profile) else {
+        return;
+    };
+    let mut doc: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let Some(bundles) = doc
+        .get_mut("dsh")
+        .and_then(|d| d.get_mut("profile"))
+        .and_then(|p| p.get_mut("bundles"))
+        .and_then(|b| b.as_array_mut())
+    else {
+        return;
+    };
+    let mut reinstated: Vec<String> = Vec::new();
+    for name in &disabled {
+        // 包已不存在（被卸载/清理）的不恢复，且视为已处理。
+        let pkg_exists = home
+            .join("profiles")
+            .join("web")
+            .join("node_modules")
+            .join(name)
+            .exists()
+            || crate::installer::dsh_node_modules(home).join(name).exists();
+        if !pkg_exists {
+            continue;
+        }
+        if !bundles.iter().any(|b| b.as_str() == Some(name)) {
+            bundles.push(serde_json::Value::String(name.clone()));
+            reinstated.push(name.clone());
+        }
+    }
+    if reinstated.is_empty() {
+        let _ = fs::remove_file(&path);
+        return;
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&doc) {
+        let _ = fs::write(&profile, s);
+    }
+    let _ = fs::remove_file(&path);
+    log::info!(
+        "dsh 版本已变化，恢复上次被禁用的插件重试: {}",
+        reinstated.join(", ")
+    );
 }
 
 /// 启动失败时构造给用户看的真实错误（尽量透出缺失的插件，而非笼统超时）。
@@ -584,5 +819,129 @@ fn is_process_alive(pid: u32) -> bool {
         tl.output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 真实故障样本：dsh 0.1.2-rc.1 移除 `installSettingsSection` 后，dshmarket 1.20.0
+    /// 链接失败拖垮整棵 DSH 的 stderr（节选自用户机器 `~/.dsh/.iyam-dsh-stderr.log`）。
+    const STDERR_DSHMARKET: &str = r#"
+Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include): failed to import loader entry dsh-market (dshmarket): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'installSettingsSection'
+file:///Users/u/.dsh/profiles/web/node_modules/.pnpm/dshmarket@1.20.0_@deepseek-ai+cordis@4.0.1/node_modules/dshmarket/lib/settings.js:35
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings';
+SyntaxError: The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'installSettingsSection'
+    at #asyncInstantiate (node:internal/modules/esm/module_job:327:21)
+    at async file:///Users/u/.dsh/lib/node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js:274:41
+    at async Entry._init (file:///Users/u/.dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js:522:39)
+    at boot (file:///Users/u/.dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js:1511:9)
+"#;
+
+    #[test]
+    fn parse_broken_plugins_names_third_party_offender() {
+        let parsed = parse_broken_plugins(STDERR_DSHMARKET);
+        assert_eq!(parsed, vec!["dshmarket".to_string()]);
+    }
+
+    #[test]
+    fn parse_broken_plugins_ignores_core_and_internal() {
+        let text = r#"
+    at async file:///h/.dsh/lib/node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js:1:1
+    at #asyncInstantiate (node:internal/modules/esm/module_job:327:21)
+Error: failed to import loader entry foo (@iyam/dsh-rtui-ui): boom
+"#;
+        assert!(parse_broken_plugins(text).is_empty());
+    }
+
+    #[test]
+    fn parse_missing_packages_dedupes() {
+        let text = "Cannot find package 'foo' \n x \n Cannot find package 'foo'";
+        assert_eq!(parse_missing_packages(text), vec!["foo".to_string()]);
+    }
+
+    /// 临时目录里的迷你 DSH_HOME：profile 含第三方 dshmarket + 核心包，核心版本可写。
+    fn fixture_home(tag: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!("iyam-quarantine-test-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("profiles").join("web").join("node_modules").join("dshmarket")).unwrap();
+        let core = crate::installer::dsh_node_modules(&home)
+            .join("@deepseek-ai")
+            .join("dsh");
+        fs::create_dir_all(&core).unwrap();
+        fs::write(home.join("profiles").join("web").join("package.json"), serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dsh": { "profile": { "bundles": [
+                "@deepseek-ai/dsh-base",
+                "@iyam/dsh-desktop-shell",
+                "dshmarket"
+            ] } }
+        }).to_string())
+        .unwrap();
+        set_core_version(&home, "0.1.1-rc.2");
+        home
+    }
+
+    fn set_core_version(home: &PathBuf, version: &str) {
+        let core = crate::installer::dsh_node_modules(home)
+            .join("@deepseek-ai")
+            .join("dsh");
+        fs::write(
+            core.join("package.json"),
+            serde_json::json!({ "name": "@deepseek-ai/dsh", "version": version }).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn bundles(home: &PathBuf) -> Vec<String> {
+        let content = fs::read_to_string(home.join("profiles").join("web").join("package.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        v["dsh"]["profile"]["bundles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn quarantine_named_then_reinstate_on_version_change() {
+        let home = fixture_home("named");
+        // 点名剥离 dshmarket：从 bundles 移除、写入隔离记录（带当前版本）。
+        let removed = quarantine_broken_plugins(&home, &[], &["dshmarket".to_string()]);
+        assert_eq!(removed, vec!["dshmarket".to_string()]);
+        assert!(!bundles(&home).contains(&"dshmarket".to_string()));
+        assert!(bundles(&home).contains(&"@deepseek-ai/dsh-base".to_string()));
+        let record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".quarantine.json")).unwrap()).unwrap();
+        assert_eq!(record["dsh_version"].as_str(), Some("0.1.1-rc.2"));
+
+        // 同版本启动：不恢复（插件大概率仍不兼容）。
+        reinstate_quarantined(&home, false);
+        assert!(!bundles(&home).contains(&"dshmarket".to_string()));
+
+        // dsh 升级后启动：自动恢复重试，隔离记录清除。
+        set_core_version(&home, "0.1.2-rc.1");
+        reinstate_quarantined(&home, false);
+        assert!(bundles(&home).contains(&"dshmarket".to_string()));
+        assert!(!home.join(".quarantine.json").exists());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn rollback_force_reinstates_and_all_third_party_strips_non_core() {
+        let home = fixture_home("all");
+        // 兜底隔离：只剥第三方，核心 @deepseek-ai/* 与 @iyam/* 保留。
+        let removed = quarantine_all_third_party(&home);
+        assert_eq!(removed, vec!["dshmarket".to_string()]);
+        assert_eq!(bundles(&home), vec!["@deepseek-ai/dsh-base".to_string(), "@iyam/dsh-desktop-shell".to_string()]);
+
+        // 回滚（force）：无视版本恢复全部被禁插件。
+        reinstate_quarantined(&home, true);
+        assert!(bundles(&home).contains(&"dshmarket".to_string()));
+        assert!(!home.join(".quarantine.json").exists());
+        let _ = fs::remove_dir_all(&home);
     }
 }

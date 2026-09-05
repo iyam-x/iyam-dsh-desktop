@@ -210,6 +210,18 @@ export default function App() {
       setMarketOffer(true);
     }).catch(() => {});
 
+    // 启动过程中自动禁用了与当前 dsh 不兼容的第三方插件：系统通知告知用户
+    // （核心功能不受影响；dsh 版本再次变化时会自动恢复重试）。
+    listen<string[]>("dsh-plugins-auto-disabled", (event: Event<string[]>) => {
+      if (exitingRef.current) return;
+      const names = (event.payload || []).filter(Boolean);
+      if (!names.length) return;
+      invoke("notify", {
+        title: "已自动禁用不兼容插件",
+        body: `${names.join("、")} 与当前 dsh 版本不兼容，已暂时禁用以保证启动；待插件适配新版本后会自动恢复`,
+      }).catch(() => {});
+    }).catch(() => {});
+
     return () => {
       cancelled = true;
     };

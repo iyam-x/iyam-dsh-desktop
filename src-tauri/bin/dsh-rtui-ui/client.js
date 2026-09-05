@@ -13,9 +13,17 @@ window.__ModuleLoader__.load({
   factory: (require) => {
     const module = { exports: {} };
     const exports = module.exports;
-    const react = require("react");
+    // react / dsh-client-runtime 依赖预加载缺失或 API 变化时，插件降级为 no-op，
+    // 绝不让 require 抛错沿 ModuleLoader 传播、拖垮整个 web UI。
+    let react, runtime;
+    try {
+      react = require("react");
+      runtime = require("@deepseek-ai/dsh-client-runtime/client");
+    } catch (e) {
+      console.warn("[iyam/dsh-rtui-ui] 客户端依赖不可用，主题插件已停用:", e);
+      return { apply() {}, inject: [] };
+    }
     const h = react.createElement;
-    const runtime = require("@deepseek-ai/dsh-client-runtime/client");
     const { defineStore } = runtime;
 
     // ── 调色板：每套预设给出 light/dark 语义色 ──
@@ -400,6 +408,11 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
     }
 
     function apply(ctx) {
+      // 运行时服务缺失（dsh API 变更）时静默停用，避免抛错影响宿主。
+      if (!ctx || !ctx.settingsScope || !ctx.theme || !ctx.slots || !ctx.locale) {
+        console.warn("[iyam/dsh-rtui-ui] 运行时服务不完整，主题插件已停用");
+        return;
+      }
       const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NS });
       ctx.locale.register(SETTINGS_NS, { zh, en });
       const store = createCustomStore();

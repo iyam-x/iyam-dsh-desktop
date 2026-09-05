@@ -1,6 +1,6 @@
 [package]
 name = "iyam-dsh-desktop"
-version = "0.2.11"
+version = "0.2.12"
 description = "DeepSeek Harness Desktop App"
 authors = []
 license = "MIT"

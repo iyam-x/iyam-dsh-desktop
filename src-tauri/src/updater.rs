@@ -13,12 +13,6 @@ pub struct UpdateInfo {
     pub has_update: bool,
     /// 该 dsh 是否由本 app 托管（app 帮装的才由 app 升级；用户自管的不动）。
     pub managed: bool,
-    /// registry 确有更新，但版本超过本 app 内置插件可兼容的 dsh 上限
-    /// （`downloader::DSH_MAX_UPDATE_VERSION`），自动更新被拦住、暂不升级。
-    /// 前端据此提示「有新版本但自动更新已暂停」，而非继续提供「下载并更新」。
-    pub update_held: bool,
-    /// 自动更新的兼容上限版本（供前端提示）。
-    pub compat_max: String,
 }
 
 #[tauri::command]
@@ -27,14 +21,10 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateInfo, Strin
     let latest = crate::downloader::latest_dsh_version().await?;
     let has_update = is_newer(&latest, &installed);
     let managed = crate::installer::is_managed();
-    let compat_max = crate::downloader::DSH_MAX_UPDATE_VERSION.to_string();
-    // 更新被兼容上限拦住：registry 确有更新，但版本超过内置插件可兼容的 dsh 版本，
-    // 自动更新暂停（不拉入破坏性变更），仍告知用户「有新版本存在」。
-    let update_held = has_update && is_newer(&latest, &compat_max);
 
-    // 托管态、有新版本、且未超兼容上限：后台自动备货（24h 节流，不阻塞返回）。
-    // 超上限（held）时不备货——用户看到的「最新」只是展示，不会真的去装破坏性版本。
-    if managed && has_update && !update_held {
+    // 托管态、有新版本：后台自动备货（24h 节流，不阻塞返回）。
+    // 可用性由启动期分层自愈保证（插件自动隔离 / 核心失败回滚），不做版本拦截。
+    if managed && has_update {
         maybe_auto_stage(&app, &latest).await;
     }
 
@@ -43,8 +33,6 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateInfo, Strin
         latest,
         has_update,
         managed,
-        update_held,
-        compat_max,
     })
 }
 
@@ -53,27 +41,21 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateInfo, Strin
 pub async fn trigger_dsh_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     let latest = crate::downloader::latest_dsh_version().await?;
     let installed = get_installed_version().await?;
-    let compat_max = crate::downloader::DSH_MAX_UPDATE_VERSION.to_string();
-    // 收敛到兼容上限：若 registry 最新版超出本 app 内置插件可兼容的 dsh 版本，
-    // 只升到上限版本（不拉入破坏性变更）；超上限时 target == installed，stage_update 会跳过。
-    let target = crate::downloader::cap_to_compat(&latest);
+    // 始终备货 registry 最新版（不做兼容上限拦截，可用性由启动期自愈兜底）。
     // 版本未变则不下备货、不重新下载（仅返回当前状态，前端据此提示"已是最新版本"）。
-    let a = target.trim_start_matches('v');
+    let a = latest.trim_start_matches('v');
     let b = installed.trim_start_matches('v');
     if crate::installer::is_managed() && a != b {
-        crate::downloader::stage_update(&app, &dsh_home(), &target)
+        crate::downloader::stage_update(&app, &dsh_home(), &latest)
             .await
             .map_err(|e| format!("备货失败: {}", e))?;
     }
     let has_update = is_newer(&latest, &installed);
-    let update_held = has_update && is_newer(&latest, &compat_max);
     Ok(UpdateInfo {
         installed,
         latest,
         has_update,
         managed: crate::installer::is_managed(),
-        update_held,
-        compat_max,
     })
 }
 

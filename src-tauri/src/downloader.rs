@@ -93,25 +93,14 @@ fn node_archive(target: &str) -> (&str, &str, &str) {
     }
 }
 
-/// 托管自动更新允许升到的「最高兼容 dsh 版本」。
+/// 托管自动更新的目标版本策略：**始终取 registry 最新版**。
 ///
-/// 本 app 内置的 `@iyam/*` 插件（dsh-rtui-ui / dsh-shell-plugin / dsh-file-handler）在构建时
-/// 针对某一 dsh 版本的客户端/插件 API 编写。dsh 的**内部**导出会破坏性变更——例如
-/// `0.1.2-rc.1` 移除了 `@deepseek-ai/dsh-settings` 的 `settingsNamespace` 导出，旧插件
-/// 升级后即报 "does not provide an export named ..."，整棵 dsh 启动失败。本 app 已随
-/// `0.1.2-rc.1` 重新适配相应插件（如 `dsh-rtui-ui` 改用 `settings.register(ns, schema)` 字符串 API），
-/// 故把它设为兼容上限；超过则不强更（用户可手动 `npm i -g` 自担风险）。
-/// 当内置插件随更新的 dsh API 再次验证/移植后，再上调此值。
-pub(crate) const DSH_MAX_UPDATE_VERSION: &str = "0.1.2-rc.1";
-
-/// 把「目标更新版本」收敛到本 app 兼容上限：超过上限则回退到上限版本，避免拉入破坏性变更。
-pub(crate) fn cap_to_compat(latest: &str) -> String {
-    if is_newer(latest, DSH_MAX_UPDATE_VERSION) {
-        DSH_MAX_UPDATE_VERSION.to_string()
-    } else {
-        latest.to_string()
-    }
-}
+/// 曾用「兼容上限」（DSH_MAX_UPDATE_VERSION）拦截破坏性 dsh 版本，但代价是官方一发
+/// 接口变更用户就被永久卡在旧版。现改为分层自愈保证可用性，上限机制已删：
+/// - 插件与新版 dsh 不兼容 → 启动时按 stderr 自动禁用肇事插件（process::quarantine_*），
+///   DSH 照常启动，被禁插件待 dsh/插件适配后自动恢复重试；
+/// - dsh 核心本身起不来 → 回滚到上一版本并标记 bad_version（本文件 rollback_*）。
+///   内置 @iyam 插件自身也做了防御（不静态依赖易变内部导出），不会成为不可隔离的肇事者。
 
 /// 查询 registry 上 @deepseek-ai/dsh 的最新版本（镜像回退）。
 pub(crate) async fn latest_dsh_version() -> Result<String, String> {
@@ -138,10 +127,8 @@ pub(crate) async fn latest_dsh_version() -> Result<String, String> {
 pub async fn bootstrap_dsh(app: &AppHandle, home: &PathBuf) -> Result<PathBuf, String> {
     let node = ensure_node(app, home).await?;
     emit_progress(app, "installing-dsh", 0.6);
-    // 收敛到本 app 兼容上限：内置 @iyam 插件针对某一 dsh 版本的客户端/插件 API 编写，
-    // 超过上限的 dsh（如 0.1.2-rc.1 移除 settingsNamespace）会让插件启动即崩，故首次安装
-    // 也只装到兼容版本（用户可手动 npm i -g 自担风险装更新版）。
-    let version = cap_to_compat(&latest_dsh_version().await?);
+    // 始终装 registry 最新版；与新版不兼容的插件由启动期自动隔离兜底（见文件头说明）。
+    let version = latest_dsh_version().await?;
     log::info!("安装 dsh {} (全局) 到 {:?}", version, home);
     install_dsh_to_tmp(app, &node, &version, home).await?;
     // 把 dsh 内部嵌套的 @deepseek-ai/* 依赖提升到顶层，供 @iyam 插件解析
@@ -153,9 +140,6 @@ pub async fn bootstrap_dsh(app: &AppHandle, home: &PathBuf) -> Result<PathBuf, S
 
 /// 升级备货：以全局方式把目标版本 dsh 装到 `~/.dsh/.staging`（全局布局），写 `.update.json`。
 pub async fn stage_update(app: &AppHandle, home: &PathBuf, target_version: &str) -> Result<(), String> {
-    // 收敛到本 app 兼容上限：dsh 一旦破坏性改动内置 @iyam 插件依赖的内部导出，
-    // 升级即启动失败。超过上限一律降到上限版本，绝不自动拉入破坏性变更。
-    let target_version = cap_to_compat(target_version);
     // 版本未变则无需重新下载/安装：直接跳过，避免每次打开都重跑 npm install。
     // 注意 target_version 可能带 `v` 前缀，与 package.json 的 version 统一去 `v` 比较。
     if let Some(cur) = package_version(home) {
@@ -352,6 +336,10 @@ pub fn rollback_after_failure(home: &PathBuf) -> bool {
         }
     }
     let _ = fs::remove_dir_all(&backup);
+
+    // 回滚即回到升级前的兼容组合：把本次升级期间被禁用的第三方插件全部恢复，
+    // 隔离记录一并清除（下次升级会重新经历「隔离→按版本自动恢复」循环）。
+    crate::process::reinstate_quarantined(home, true);
 
     // 标记 bad，避免再次升级到该版本。附上 app 版本：内置插件随 app 升级重新适配后，
     // 旧坏标记即失效（见 updater::read_bad_version），允许换个已修复的 app 后重试。
@@ -953,7 +941,7 @@ fn copy_dir_follow_symlinks_impl(
     Ok(())
 }
 
-fn package_version(dir: &Path) -> Option<String> {
+pub(crate) fn package_version(dir: &Path) -> Option<String> {
     let content = fs::read_to_string(dir.join("package.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     v.get("version").and_then(|x| x.as_str()).map(|s| s.to_string())

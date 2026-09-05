@@ -4,6 +4,35 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.12] - 2026-09-05
+
+### 修复
+
+- **dsh 升级后「整棵启动失败→回滚」的死循环**：第三方插件（如 dshmarket 1.20.0）静态 import 了
+  dsh 0.1.2-rc.1 移除的内部导出（`installSettingsSection`），ESM 链接期即崩、拖垮整棵 DSH；
+  旧自愈只识别 `Cannot find package`，识别不了这类链接错误，只能回滚并标记坏版本，用户被
+  永久卡在旧版 dsh。现改为分层自愈，保证**始终可用最新版 dsh**：
+  - **插件自动隔离（泛化）**：启动失败时从 stderr 解析肇事插件——`failed to import loader entry
+    <id> (<pkg>)` 汇总行与栈里的 `node_modules/...` 路径（含 `.pnpm` 布局）——只禁用肇事者后重试；
+    点不出具体插件时，最后一轮禁用全部第三方插件（`@deepseek-ai/*`、`@iyam/*` 核心除外），
+    保证 DSH 必然能启动。`dshmarket` 不再被当作核心包保护。
+  - **隔离记录与自动恢复**：被禁插件记入 `~/.dsh/.quarantine.json`（含当时 dsh 版本）；dsh
+    版本变化后下次启动自动恢复重试（新版下插件可能已适配），仍不兼容则再次隔离；升级失败
+    回滚时无条件全部恢复。系统通知告知用户被禁用了哪些插件。
+  - **回滚后自动重启**：升级提升后启动失败并完成回滚时，app 自动用回滚后的版本重新拉起
+    DSH，不再要求用户手动重开。
+  - **内置插件自身加固**：`dsh-rtui-ui` host 侧改为动态 `import()` schemastery + `settings.register`
+    全程守卫（`@iyam` 插件受隔离保护、无法被禁用，必须自身永不崩——此前静态 import 内部包
+    是同类隐患）；client 侧 `require` 失败降级为 no-op。
+  - 修复隔离判定中「已安装」检查的路径错误（unix 全局布局为 `lib/node_modules`，市场插件在
+    `profiles/web/node_modules`），避免误剥离正常插件。
+
+### 变更
+
+- **放开 dsh 自动更新上限**：移除 `DSH_MAX_UPDATE_VERSION` 兼容上限机制（`cap_to_compat` /
+  `update_held` / `compat_max`），托管更新始终升到 registry 最新版——可用性由上述启动期自愈
+  兜底，不再因官方接口调整把用户卡在旧版。`bad_version` 防护保留（仅拦「核心都起不来」的版本）。
+
 ## [0.2.11] - 2026-09-04
 
 ### 变更
