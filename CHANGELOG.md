@@ -4,6 +4,19 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.2.16] - 2026-09-08
+
+### 修复
+
+- **第三方插件 client 产物为 ESM 时整页报 `Failed to load plugins`**：dsh 把所有插件的
+  client bundle 拼成一个 classic `<script>` 下发（`/plugins/??a/client.js,b/client.js`）。
+  任一插件只要打成 ESM（顶层 `import`/`export`）或压根没调用 `__ModuleLoader__.load`，
+  整段 4MB 的 combo 就会解析失败、**全部**插件无法注册；而后端启动完全正常、stderr 无异常，
+  既有的「启动失败自动隔离」链路感知不到，前端报的模块名还只是批次里第一个条目（如
+  `@deepseek-ai/dsh-typert-registry`），与真凶无关。现增加启动前预检：扫描非核心插件的
+  client 产物，命中即隔离（含剥掉 `cordis.patch.yml` 覆盖层条目、留 `.bak` 备份、记入
+  `.quarantine.json` 待 dsh 版本变化重试），单个格式错误的插件不再拖垮整个界面。
+
 ## [0.2.15] - 2026-09-05
 
 ### 修复

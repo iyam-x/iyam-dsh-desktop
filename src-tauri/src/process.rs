@@ -116,6 +116,16 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<String, String> {
     // 新版 dsh 下插件可能已适配；若仍不兼容，下方启动重试会再次隔离它。
     reinstate_quarantined(&home, false);
 
+    // client bundle 格式预检：ESM 产物会让整条 combo 脚本解析失败，但服务端正常起来、
+    // stderr 无任何异常——既有的「启动失败自动隔离」链路感知不到，故必须在 spawn 前隔离。
+    let preflight_removed = preflight_client_bundles(&home);
+    if !preflight_removed.is_empty() {
+        log::warn!(
+            "client bundle 格式不合规，启动前已自动禁用: {}",
+            preflight_removed.join(", ")
+        );
+    }
+
     // 适配 dsh web 认证（token 直取 index，见 installer::ensure_web_auth_patch）。
     // 每次启动幂等重补（升级 dsh 会还原文件）；补丁刚有变化时下方不再复用旧进程，
     // 强制全新 spawn 让内存代码与磁盘一致。
@@ -244,7 +254,7 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<String, String> {
 
     // 启动并等待端口；失败则自愈（自动剥离不兼容/损坏的插件）后重试，最多 3 轮。
     let max_retries = 3;
-    let mut all_removed: Vec<String> = Vec::new();
+    let mut all_removed: Vec<String> = preflight_removed;
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -694,6 +704,191 @@ fn quarantine_all_third_party(home: &PathBuf) -> Vec<String> {
     removed
 }
 
+/// 启动前预检第三方插件的 client bundle 格式，隔离会拖垮整条 combo 的插件。
+///
+/// 背景：dsh 的 client-modules 把所有插件的 client bundle **拼成一个 classic `<script>`**
+/// 下发（`/plugins/??a/client.js,b/client.js&rev=xxx`）。产物必须是自带
+/// `window.__ModuleLoader__.load(...)` 的 classic script；只要其中任一个插件打成 ESM
+/// （顶层 `import` / `export`），整段 4MB 的 combo 就 SyntaxError 解析失败，
+/// **所有**插件都无法注册。此时后端完全正常（stderr 无异常、spawn 成功），既有的
+/// 「启动失败自动隔离」链路感知不到；前端只报排在批次第一个的模块，与真凶无关——
+/// 例如 `dsh-task-ritual` 用 `esbuild --format=esm` 构建 client 时，症状是
+/// `Failed to load plugins / bundle … loaded without registering "@deepseek-ai/dsh-typert-registry"`。
+///
+/// 返回被自动禁用的插件名（已写入隔离记录，待 dsh 版本变化时自动重试）。
+pub(crate) fn preflight_client_bundles(home: &PathBuf) -> Vec<String> {
+    let broken = scan_invalid_client_bundles(home);
+    if broken.is_empty() {
+        return Vec::new();
+    }
+    // 先从 profile 的 bundles / dependencies 里剥离（复用既有的删除 + 记录逻辑）。
+    let mut removed = quarantine_broken_plugins(home, &[], &broken);
+    // 只通过 cordis.patch.yml 覆盖层启用的插件（`dsh plugin add` 装的本地插件）
+    // 不在 package.json 里，需单独摘掉覆盖层条目，否则照样会被加载。
+    let mut patched = strip_patch_entries(home, &broken);
+    if !patched.is_empty() {
+        record_quarantine(home, &patched);
+        removed.append(&mut patched);
+    }
+    removed.sort();
+    removed.dedup();
+    removed
+}
+
+/// 扫描已安装的非核心插件，挑出 client bundle 格式不合规的（格式问题会让整条 combo 挂掉）。
+fn scan_invalid_client_bundles(home: &PathBuf) -> Vec<String> {
+    let roots = [
+        crate::installer::dsh_node_modules(home),
+        home.join("profiles").join("web").join("node_modules"),
+    ];
+    let mut seen: Vec<String> = Vec::new();
+    let mut broken: Vec<String> = Vec::new();
+    for root in roots {
+        for (name, dir) in plugin_packages(&root) {
+            // 核心包（含本 app 自带的 @iyam/*）不受预检管辖：它们坏了应由其他自愈链路处理。
+            if is_core_bundle(&name) || seen.contains(&name) {
+                continue;
+            }
+            seen.push(name.clone());
+            let Some(client) = client_bundle_path(&dir) else {
+                continue;
+            };
+            if let Some(why) = client_bundle_problem(&client) {
+                log::warn!("插件 {} 的 client bundle 不合规（{}）: {:?}", name, why, client);
+                broken.push(name);
+            }
+        }
+    }
+    broken
+}
+
+/// 枚举 `node_modules` 根下的第三方包（含 `@scope/name` 形式），跳过 dot 目录。
+fn plugin_packages(root: &PathBuf) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(raw) = entry.file_name().to_str().map(String::from) else {
+            continue;
+        };
+        if raw.starts_with('.') {
+            continue;
+        }
+        if raw.starts_with('@') {
+            let Ok(inner) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for sub in inner.flatten() {
+                let sub_dir = sub.path();
+                if !sub_dir.is_dir() {
+                    continue;
+                }
+                let Some(name) = sub.file_name().to_str().map(String::from) else {
+                    continue;
+                };
+                if name.starts_with('.') {
+                    continue;
+                }
+                out.push((format!("{raw}/{name}"), sub_dir));
+            }
+            continue;
+        }
+        out.push((raw, dir));
+    }
+    out
+}
+
+/// 解析插件包声明的 client 产物路径（`exports["./client"]`，退回 `client.js` / `lib/client.js`）。
+fn client_bundle_path(dir: &PathBuf) -> Option<PathBuf> {
+    let content = fs::read_to_string(dir.join("package.json")).ok()?;
+    let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let declared = pkg
+        .get("exports")
+        .and_then(|e| e.get("./client"))
+        .and_then(|c| match c {
+            serde_json::Value::String(s) => Some(s.clone()),
+            other => other.get("default")?.as_str().map(String::from),
+        });
+    let candidates: Vec<PathBuf> = match declared {
+        Some(rel) => vec![dir.join(rel)],
+        None => vec![dir.join("client.js"), dir.join("lib").join("client.js")],
+    };
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// 判定 client bundle 是否会毁掉整条 combo：`None` 表示合规。
+fn client_bundle_problem(path: &PathBuf) -> Option<&'static str> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    if !content.contains("__ModuleLoader__.load") {
+        return Some("未通过 __ModuleLoader__.load 注册");
+    }
+    for line in content.lines() {
+        let line = line.trim_end();
+        // 只看行首（打包产物的顶层语句顶格出现），避免把字符串内容误判成 ESM。
+        let esm = ["import ", "import{", "import\"", "import'", "export ", "export{"]
+            .iter()
+            .any(|p| line.starts_with(p));
+        if esm {
+            return Some("含顶层 ESM 语句，应为 classic script");
+        }
+    }
+    None
+}
+
+/// 从 `profiles/web/cordis.patch.yml` 覆盖层摘掉指定插件的条目。
+///
+/// 覆盖层是 `dsh plugin add` 写出的 JSON 风格数组，条目多为单行对象；多行对象无法安全
+/// 整条删除时保留（宁可不隔离，也不写坏用户配置），并留 `.bak` 备份便于手动还原。
+fn strip_patch_entries(home: &PathBuf, names: &[String]) -> Vec<String> {
+    let path = home.join("profiles").join("web").join("cordis.patch.yml");
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut removed: Vec<String> = Vec::new();
+    let kept: Vec<&str> = content
+        .lines()
+        .filter(|line| {
+            let t = line.trim();
+            for name in names {
+                if !t.contains(name.as_str()) {
+                    continue;
+                }
+                if !(t.starts_with('{') && t.ends_with('}') && t.contains("\"name\"")) {
+                    log::warn!("cordis.patch.yml 中 {} 的条目非单行对象，跳过隔离", name);
+                    continue;
+                }
+                if !removed.contains(name) {
+                    removed.push(name.clone());
+                }
+                return false;
+            }
+            true
+        })
+        .collect();
+    if removed.is_empty() {
+        return Vec::new();
+    }
+    let backup = path.with_extension("yml.bak");
+    if !backup.exists() {
+        let _ = fs::copy(&path, &backup);
+    }
+    let mut new = kept.join("\n");
+    if content.ends_with('\n') {
+        new.push('\n');
+    }
+    let _ = fs::write(&path, new);
+    removed
+}
+
 /// 把本次被禁用的插件合并记录到 `<home>/.quarantine.json`，并附上当前 dsh 版本。
 /// 供「dsh 版本变化后自动恢复重试」（`reinstate_quarantined`）与回滚时还原。
 fn record_quarantine(home: &PathBuf, removed: &[String]) {
@@ -979,6 +1174,102 @@ Error: failed to import loader entry foo (@iyam/dsh-rtui-ui): boom
             .iter()
             .map(|x| x.as_str().unwrap().to_string())
             .collect()
+    }
+
+    #[test]
+    fn client_bundle_problem_flags_esm_and_unregistered() {
+        // 合规：注册 + 无顶层 ESM（真实插件产物形态）。
+        let home = fixture_home("client-ok");
+        let ok = home.join("ok-client.js");
+        fs::write(
+            &ok,
+            "window.__ModuleLoader__.load({id:\"x\",factory:(require)=>{}});\n",
+        )
+        .unwrap();
+        assert_eq!(client_bundle_problem(&ok), None);
+
+        // ESM 产物（dsh-task-ritual 故障样本形态）：会把整条 combo 打成 SyntaxError。
+        let esm = home.join("esm-client.js");
+        fs::write(
+            &esm,
+            "import React from \"react\";\nwindow.__ModuleLoader__.load({id:\"x\",factory:()=>{}});\nexport { apply };\n",
+        )
+        .unwrap();
+        assert!(client_bundle_problem(&esm).is_some());
+
+        // 压根没注册：dsh 永远加载不到它。
+        let bare = home.join("bare-client.js");
+        fs::write(&bare, "console.log(1);\n").unwrap();
+        assert_eq!(
+            client_bundle_problem(&bare),
+            Some("未通过 __ModuleLoader__.load 注册")
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn plugin_packages_keeps_scope_prefix_and_skips_core() {
+        let home = fixture_home("packages");
+        let nm = crate::installer::dsh_node_modules(&home);
+        fs::create_dir_all(nm.join("@third-party").join("broken-client")).unwrap();
+        fs::create_dir_all(nm.join("solo-plugin")).unwrap();
+        let mut names: Vec<String> = plugin_packages(&nm)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        // scope 名必须带 `@`，否则 `is_core_bundle` 认不出核心包、预检会误伤。
+        assert!(names.contains(&"@third-party/broken-client".to_string()));
+        assert!(names.contains(&"@deepseek-ai/dsh".to_string()));
+        assert!(names.contains(&"solo-plugin".to_string()));
+        assert!(!names.contains(&"deepseek-ai/dsh".to_string()));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn preflight_isolates_esm_plugin_and_strips_patch_entry() {
+        let home = fixture_home("preflight");
+        let pkg_dir = home
+            .join("profiles")
+            .join("web")
+            .join("node_modules")
+            .join("dsh-task-ritual");
+        fs::create_dir_all(pkg_dir.join("lib")).unwrap();
+        fs::write(
+            pkg_dir.join("package.json"),
+            serde_json::json!({
+                "name": "dsh-task-ritual",
+                "exports": { "./client": { "default": "./lib/client.js" } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // ESM 产物：会让包含它的整条 combo 解析失败。
+        fs::write(
+            pkg_dir.join("lib").join("client.js"),
+            "import React from \"react\";\nexport const name = 'dsh-task-ritual';\n",
+        )
+        .unwrap();
+        let patch = home.join("profiles").join("web").join("cordis.patch.yml");
+        fs::write(&patch, "[\n  { \"id\": \"task-ritual\", \"name\": \"dsh-task-ritual\" }\n]\n").unwrap();
+
+        let removed = preflight_client_bundles(&home);
+        assert_eq!(removed, vec!["dsh-task-ritual".to_string()]);
+        // 覆盖层条目摘掉（否则仍会被加载），并留下备份便于手动还原。
+        let patch_after = fs::read_to_string(&patch).unwrap();
+        assert!(!patch_after.contains("dsh-task-ritual"));
+        assert!(home
+            .join("profiles")
+            .join("web")
+            .join("cordis.patch.yml.bak")
+            .exists());
+        // 走既有隔离记录：dsh 版本变化后会自动重试该插件。
+        let record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".quarantine.json")).unwrap()).unwrap();
+        assert_eq!(record["disabled"][0].as_str(), Some("dsh-task-ritual"));
+        // 核心 bundle 不受影响。
+        assert!(bundles(&home).contains(&"@deepseek-ai/dsh-base".to_string()));
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
