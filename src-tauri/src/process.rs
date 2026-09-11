@@ -13,6 +13,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 记录"拉起当前 DSH 进程的 app 版本"的标记文件（相对 `<home>`）。
 const APP_BUILD_MARKER: &str = ".iyam-app-version";
 
+/// 记录"已向用户提醒过安装插件市场"的标记文件（相对 `<home>`）。
+const MARKET_OFFER_MARKER: &str = ".iyam-dsh.market-offered";
+
 use regex::Regex;
 use tauri::Emitter;
 #[cfg(windows)]
@@ -451,7 +454,7 @@ fn spawn_and_wait_port(
                 }
                 *global = Some(child);
             }
-            if !crate::installer::dshmarket_installed(home) {
+            if should_offer_market(home) {
                 let _ = app.emit("dshmarket-offer-install", ());
             }
             let exit_app = app.clone();
@@ -477,6 +480,23 @@ fn spawn_and_wait_port(
             Err(())
         }
     }
+}
+
+/// 是否应向用户发出「安装插件市场」提醒。
+///
+/// 只在**首次启动**提醒一次：市场未安装、且本机尚未写过提醒标记时返回 true，
+/// 并立即落盘标记，此后无论用户安装还是暂不安装都不再提醒。
+/// 标记放在 `<home>` 下，与 `.iyam-dsh.*` 壳层状态文件同一惯例，不依赖 dsh 内部结构。
+fn should_offer_market(home: &PathBuf) -> bool {
+    if crate::installer::dshmarket_installed(home) {
+        return false;
+    }
+    let marker = home.join(MARKET_OFFER_MARKER);
+    if marker.exists() {
+        return false;
+    }
+    fs::write(&marker, b"").ok();
+    true
 }
 
 /// 从一段 stderr 文本里解析出所有 `Cannot find package '<pkg>'` 的包名（去重、保序）。
@@ -1186,6 +1206,36 @@ Error: failed to import loader entry foo (@iyam/dsh-rtui-ui): boom
             .iter()
             .map(|x| x.as_str().unwrap().to_string())
             .collect()
+    }
+
+    #[test]
+    fn market_offer_only_once_until_installed() {
+        let home = std::env::temp_dir().join(format!(
+            "iyam-market-offer-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        // 未安装市场：首次启动提醒一次。
+        assert!(should_offer_market(&home));
+        // 同一台机器再次启动：标记已落盘，不再提醒（用户暂不安装也如此）。
+        assert!(!should_offer_market(&home));
+
+        // 已安装市场：即使清掉提醒标记也不再提醒。
+        fs::remove_file(home.join(MARKET_OFFER_MARKER)).unwrap();
+        fs::create_dir_all(
+            home.join("profiles").join("web").join("node_modules").join("dshmarket"),
+        )
+        .unwrap();
+        fs::write(
+            home.join("profiles").join("web").join("package.json"),
+            serde_json::json!({ "dsh": { "profile": { "bundles": ["dshmarket"] } } }).to_string(),
+        )
+        .unwrap();
+        assert!(!should_offer_market(&home));
+
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

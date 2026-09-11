@@ -26,7 +26,7 @@ export default function App() {
   });
   // 标记应用正在退出（用户主动退出），用于抑制退出时 DSH 进程被杀触发的崩溃卡片一闪。
   const exitingRef = useRef(false);
-  // 启动完成后是否展示「安装插件市场」询问弹窗（仅当 dshmarket 尚未安装时）。
+  // 启动完成后是否展示「安装插件市场」询问弹窗（后端仅在首次启动且 dshmarket 未安装时发来事件）。
   const [marketOffer, setMarketOffer] = useState(false);
   const [marketInstalling, setMarketInstalling] = useState(false);
   const [marketError, setMarketError] = useState<string | null>(null);
