@@ -1,6 +1,6 @@
 {
   "name": "iyam-dsh-desktop",
-  "version": "0.2.16",
+  "version": "1.0.0",
   "description": "DeepSeek Harness Desktop App",
   "type": "module",
   "scripts": {
@@ -13,17 +13,10 @@
     "fetch:node": "node scripts/fetch-node.mjs"
   },
   "dependencies": {
-    "@codemirror/commands": "^6",
-    "@codemirror/language": "^6",
-    "@codemirror/language-data": "^6",
-    "@codemirror/state": "^6",
-    "@codemirror/theme-one-dark": "^6",
-    "@codemirror/view": "^6",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-notification": "^2",
     "@tauri-apps/plugin-shell": "^2",
-    "@tauri-apps/plugin-store": "^2",
-    "codemirror": "^6"
+    "@tauri-apps/plugin-store": "^2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

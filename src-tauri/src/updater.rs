@@ -87,7 +87,7 @@ async fn maybe_auto_stage(app: &tauri::AppHandle, latest: &str) {
 
     // 已知坏版本防护：若 registry 最新版正是 .update.json 里标记失败的版本，跳过自动备货，
     // 避免每 24h 反复「备货→启动失败→回滚」循环（如用户装有旧版 dshmarket 在 0.1.2-rc.1 上崩）。
-    // 用户仍可在「检查更新」里看到该版本、手动决定。
+    // 用户仍可在「检查 dsh 更新」里看到该版本、手动决定。
     if let Some(bad) = read_bad_version(&home) {
         if bad == latest {
             return;
@@ -139,7 +139,10 @@ async fn get_installed_version() -> Result<String, String> {
         .unwrap_or_else(|| "unknown".to_string()))
 }
 
-fn is_newer(latest: &str, installed: &str) -> bool {
+/// 语义化版本比较：`latest` 是否比 `installed` 新。
+/// 本地版本无法解析（如 "unknown"）时视为有更新。DSH 版本与本 app 版本（app_update）
+/// 共用同一套 semver 语义。
+pub(crate) fn is_newer(latest: &str, installed: &str) -> bool {
     match (semver::Version::parse(latest), semver::Version::parse(installed)) {
         (Ok(l), Ok(i)) => l > i,
         (Ok(_), Err(_)) => true, // 本地版本无法解析（如 unknown）→ 视为有更新

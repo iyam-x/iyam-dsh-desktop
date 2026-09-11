@@ -10,6 +10,9 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// 记录"拉起当前 DSH 进程的 app 版本"的标记文件（相对 `<home>`）。
+const APP_BUILD_MARKER: &str = ".iyam-app-version";
+
 use regex::Regex;
 use tauri::Emitter;
 #[cfg(windows)]
@@ -135,21 +138,19 @@ pub async fn start_dsh(app: tauri::AppHandle) -> Result<String, String> {
     let cli = detect_dsh_cli().ok_or("未找到 dsh 命令，请检查安装或网络后重试。")?;
 
     // 内置插件刷新（幂等）必须在"已运行早退"之前执行，否则 DSH 已在运行时新插件永远装不上。
-    // needs_dsh_restart：文件查看插件是最近新增的内置插件；刷新前它不在 DSH_HOME，
-    // 说明运行中的 DSH 早于当前构建（未加载我们的插件集）→ 下方检测到已运行时会杀掉重启。
-    let needs_dsh_restart = !crate::installer::dsh_node_modules(&home)
-        .join("@iyam")
-        .join("dsh-file-handler")
-        .join("client.js")
-        .exists();
+    // needs_dsh_restart：运行中的 DSH 是否由另一版 app 拉起（内置插件集可能已变化）→ 杀掉重启。
+    // 锚点是 spawn 时写入的 app 版本标记（见 spawn_and_wait_port）：它直接表达"这个进程是谁
+    // 拉起的"，不像原先锚定某个插件目录是否存在那样会随插件增减而失效。
+    let needs_dsh_restart = read_app_build_marker(&home) != env!("CARGO_PKG_VERSION");
     if let Err(e) = crate::installer::refresh_shell_plugin(&app) {
         log::warn!("refresh shell plugin failed: {}", e);
     }
     if let Err(e) = crate::installer::refresh_rtui_ui_plugin(&app) {
         log::warn!("refresh rtui-ui plugin failed: {}", e);
     }
-    if let Err(e) = crate::installer::refresh_file_handler_plugin(&app) {
-        log::warn!("refresh file-handler plugin failed: {}", e);
+    // 内置文件预览插件已下线（dsh 原生已提供文件预览），每次启动清理历史安装残留。
+    if let Err(e) = crate::installer::remove_file_handler_plugin(&home) {
+        log::warn!("remove legacy file-handler plugin failed: {}", e);
     }
     // 每次启动都校准顶层 `@deepseek-ai/*` 与 core 内嵌版本一致：升级 core 后若顶层残留旧版
     // 会与新的 client-modules 等错配（如 boot manifest 缺 batches 字段）。版本一致则跳过，
@@ -359,6 +360,14 @@ fn stored_web_url(home: &PathBuf, port: u16) -> String {
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", port))
 }
 
+/// 读取"拉起当前 DSH 进程的 app 版本"标记；缺失时返回空串（与任何版本都不等，
+/// 视为需要重启以对齐内置插件集）。
+fn read_app_build_marker(home: &PathBuf) -> String {
+    fs::read_to_string(home.join(APP_BUILD_MARKER))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
 /// 启动 DSH 子进程并等待其打出端口行。
 /// 成功：完成 URL/port/版本落盘、子进程守护、市场弹窗等全部收尾，返回带 token 的访问 URL。
 /// 失败（超时/早退）：杀掉子进程并等 stderr 落盘，返回 `Err(())`。
@@ -376,6 +385,9 @@ fn spawn_and_wait_port(
         }
     };
     fs::write(pid_file, child.id().to_string()).ok();
+    // 记录拉起本次 DSH 的 app 版本：下次启动据此判断运行中的 DSH 是否来自另一版 app
+    //（内置插件集可能已变化），需要杀掉重启（见 start_dsh 的 needs_dsh_restart）。
+    fs::write(home.join(APP_BUILD_MARKER), env!("CARGO_PKG_VERSION")).ok();
 
     // 落盘 stderr 便于排查；保留 JoinHandle 以便失败时等其刷完
     let stderr_log = home.join(".iyam-dsh-stderr.log");

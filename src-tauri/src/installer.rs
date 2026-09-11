@@ -256,32 +256,6 @@ pub(crate) fn bundled_rtui_ui_plugin(app: &tauri::AppHandle) -> Option<PathBuf> 
     None
 }
 
-/// 定位 bundle 内的文件查看插件包（包装 openPath，转发文件点击给桌面壳预览）
-pub(crate) fn bundled_file_handler_plugin(app: &tauri::AppHandle) -> Option<PathBuf> {
-    if let Ok(res_dir) = app.path().resource_dir() {
-        let candidate = res_dir.join("bin").join("dsh-file-handler");
-        if candidate.join("client.js").exists() && candidate.join("package.json").exists() {
-            return Some(candidate);
-        }
-    }
-    if let Some(candidate) = exe_dir_candidate("dsh-file-handler", |p| {
-        p.join("client.js").exists() && p.join("package.json").exists()
-    }) {
-        return Some(candidate);
-    }
-    if let Ok(cwd) = env::current_dir() {
-        for candidate in [
-            cwd.join("src-tauri").join("bin").join("dsh-file-handler"),
-            cwd.join("bin").join("dsh-file-handler"),
-        ] {
-            if candidate.join("client.js").exists() && candidate.join("package.json").exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
 /// 基于可执行文件所在目录解析资源（dev 模式 build.rs 将资源复制到 exe 同级）
 fn exe_dir_candidate(subdir: &str, check: impl Fn(&PathBuf) -> bool) -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
@@ -329,19 +303,20 @@ pub(crate) async fn check_and_install(app: tauri::AppHandle) -> Result<InstallSt
     Ok(InstallStatus::Installed)
 }
 
-/// 注入三个体验插件 + 任务栏 AUMID 预加载 + 目录选择器 owner 补丁（幂等）。
+/// 注入两个体验插件 + 任务栏 AUMID 预加载 + 目录选择器 owner 补丁（幂等）。
 /// 所有写入都落在 `dsh_home()`（即 `~/.dsh`），与用户自行安装的 dsh 一致。
 fn inject_plugins_and_patches(app: &tauri::AppHandle) -> Result<(), String> {
+    let home = dsh_home();
     if let Err(e) = refresh_shell_plugin(app) {
         log::warn!("inject shell plugin failed: {}", e);
     }
     if let Err(e) = refresh_rtui_ui_plugin(app) {
         log::warn!("inject rtui-ui plugin failed: {}", e);
     }
-    if let Err(e) = refresh_file_handler_plugin(app) {
-        log::warn!("inject file-handler plugin failed: {}", e);
+    // 内置文件预览插件已下线（dsh 原生已提供文件预览），清理历史安装残留。
+    if let Err(e) = remove_file_handler_plugin(&home) {
+        log::warn!("remove legacy file-handler plugin failed: {}", e);
     }
-    let home = dsh_home();
     if let Err(e) = ensure_taskbar_preload(&home) {
         log::warn!("ensure taskbar preload failed: {}", e);
     }
@@ -779,54 +754,56 @@ fn install_rtui_ui_plugin(home: &PathBuf, plugin: &PathBuf) -> Result<(), String
     Ok(())
 }
 
-/// 每次启动刷新文件查看插件（幂等）
-pub(crate) fn refresh_file_handler_plugin(app: &tauri::AppHandle) -> Result<(), String> {
-    let home = dsh_home();
-    if let Some(plugin) = bundled_file_handler_plugin(app) {
-        install_file_handler_plugin(&home, &plugin)
-    } else {
-        Ok(())
-    }
-}
-
-/// 安装文件查看插件：复制到 <DSH_HOME>/node_modules/@iyam/dsh-file-handler，建 profile 软链，注册 bundles。
-fn install_file_handler_plugin(home: &PathBuf, plugin: &PathBuf) -> Result<(), String> {
-    let dest = dsh_node_modules(home)
-        .join("@iyam")
-        .join("dsh-file-handler");
-    copy_dir_all(plugin, &dest).map_err(|e| format!("复制文件查看插件失败: {}", e))?;
-    ensure_profile_iyam_link(home, "dsh-file-handler", &dest)?;
+/// 清理历史安装的内置文件预览插件（幂等）。该插件已下线：dsh 原生已提供文件预览，
+/// 且我们依赖的 `openPath` 客户端服务在上游被移除。
+///
+/// 只"不再打包"不够——老机器的 `~/.dsh` 里仍留有插件目录与 profile 注册项，
+/// DSH 照样会加载它（且包被删后指向不存在的模块会拖垮启动）。故每次启动都摘干净：
+/// 从 `dsh.profile.bundles` 移除注册项（不写 `.quarantine.json`——这是主动下线，
+/// 不是兼容性禁用，不能被"dsh 版本变化后自动恢复"再加回来），并删除两处插件目录。
+pub(crate) fn remove_file_handler_plugin(home: &PathBuf) -> Result<(), String> {
+    const PLUGIN: &str = "@iyam/dsh-file-handler";
 
     let profile_pkg = home.join("profiles").join("web").join("package.json");
-    let mut v: serde_json::Value = if profile_pkg.exists() {
-        let content =
-            fs::read_to_string(&profile_pkg).map_err(|e| format!("读取 profile 配置失败: {}", e))?;
-        serde_json::from_str(&content).map_err(|e| format!("解析 profile 配置失败: {}", e))?
-    } else {
-        if let Some(parent) = profile_pkg.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("创建 profile 目录失败: {}", e))?;
+    if let Ok(content) = fs::read_to_string(&profile_pkg) {
+        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&content) {
+            let removed = v["dsh"]["profile"]["bundles"]
+                .as_array_mut()
+                .map(|bundles| {
+                    let before = bundles.len();
+                    bundles.retain(|b| b.as_str() != Some(PLUGIN));
+                    before != bundles.len()
+                })
+                .unwrap_or(false);
+            if removed {
+                let out = serde_json::to_string_pretty(&v)
+                    .map_err(|e| format!("序列化 profile 配置失败: {}", e))?;
+                fs::write(&profile_pkg, out + "\n")
+                    .map_err(|e| format!("写入 profile 配置失败: {}", e))?;
+            }
         }
-        serde_json::json!({
-            "name": "dsh-profile-web",
-            "private": true,
-            "dependencies": {},
-            "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"] } }
-        })
-    };
-
-    let bundles = v["dsh"]["profile"]["bundles"]
-        .as_array_mut()
-        .ok_or("profile 配置缺少 dsh.profile.bundles")?;
-    if !bundles
-        .iter()
-        .any(|b| b.as_str() == Some("@iyam/dsh-file-handler"))
-    {
-        bundles.push(serde_json::Value::String("@iyam/dsh-file-handler".into()));
     }
 
-    let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化 profile 配置失败: {}", e))?;
-    fs::write(&profile_pkg, out + "\n").map_err(|e| format!("写入 profile 配置失败: {}", e))?;
+    for dir in [
+        dsh_node_modules(home).join("@iyam").join("dsh-file-handler"),
+        home.join("profiles").join("node_modules").join("@iyam").join("dsh-file-handler"),
+    ] {
+        remove_dir_or_link(&dir)?;
+    }
     Ok(())
+}
+
+/// 删除目录；软链只删链本身（不跟随目标），不存在视为已完成。
+fn remove_dir_or_link(path: &PathBuf) -> Result<(), String> {
+    let md = match fs::symlink_metadata(path) {
+        Ok(md) => md,
+        Err(_) => return Ok(()),
+    };
+    if md.file_type().is_symlink() || !md.is_dir() {
+        fs::remove_file(path).map_err(|e| format!("删除 {} 失败: {}", path.display(), e))
+    } else {
+        fs::remove_dir_all(path).map_err(|e| format!("删除 {} 失败: {}", path.display(), e))
+    }
 }
 
 /// 任务栏 AUMID 预加载脚本（同前，略）

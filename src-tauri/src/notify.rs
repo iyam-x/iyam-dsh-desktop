@@ -2,7 +2,7 @@
 //!
 //! 策略（与 dsh-rtui 验证过的 notify_when_obscured 一致）：仅当主窗口被"遮蔽"
 //! （不可见 / 最小化 / 失焦）时才弹系统通知；窗口可见且聚焦时界面本身在展示，
-//! 不弹，避免打扰正在看界面的用户。
+//! 不弹，避免打扰正在看界面的用户。`force=true` 可跳过该判断（本 app 更新提示）。
 //!
 //! 点击处理：点击系统通知要把主窗口带到前台（显示/还原/聚焦）。
 //!
@@ -42,9 +42,15 @@ fn bring_main_to_front(app: &tauri::AppHandle) {
     }
 }
 
+/// `force=true` 时跳过遮蔽判断，窗口聚焦也弹（用于"本 app 有新版本"这类值得打断一次的提示）。
 #[tauri::command]
-pub fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
-    if !window_obscured(&app) {
+pub fn notify(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+    force: Option<bool>,
+) -> Result<(), String> {
+    if force != Some(true) && !window_obscured(&app) {
         return Ok(());
     }
 

@@ -10,6 +10,9 @@
   background: #0f172a;
   height: 100%;
   overflow: hidden;
+  /* 自绘标题栏高度。DSH 主内容区的顶部让位由 dsh-shell-plugin 注入的 CSS 处理
+     （只下移主内容列、左侧栏保持贴顶），此处仅用于标题栏自身的尺寸。 */
+  --titlebar-h: 30px;
 }
 
 html,
@@ -44,7 +47,7 @@ body,
   top: 0;
   left: 0;
   right: 0;
-  height: 30px;
+  height: var(--titlebar-h);
   z-index: 100;
   display: flex;
   align-items: center;

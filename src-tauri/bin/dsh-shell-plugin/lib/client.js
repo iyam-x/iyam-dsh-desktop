@@ -8,23 +8,25 @@ window.__ModuleLoader__.load({
 		const inject = ["sessions"];
 
 		function apply(ctx) {
-			// 注入平台布局 CSS：避让原生窗口控件
+			// 顶部让位系统按钮：只把**主内容列**下移一个标题栏高度（30px，见桌面壳
+			// src/index.css 的 --titlebar-h），右上角窗口按钮因此不压 dsh 头部工具区。
+			// 左侧栏不参与——Windows/Linux 的按钮只在右上角，侧栏保持贴窗口顶边（与
+			// 改动前一致）。主内容上方那条 30px 由 frame 自身的 bg-base 绘制，与头部
+			// 同色，无接缝（故无需壳层再画一条留白）。
 			const isMac = /mac|iphone|ipad/i.test(navigator.userAgent);
 			const style = document.createElement("style");
 			style.id = "iyam-dsh-shell-css";
 			style.textContent = `
-/* macOS：左侧栏整体下移，避开左上角红绿灯。
-   侧栏 slot 元素是 display:contents（无盒模型，margin 不生效），
-   因此作用在其第一个可见子元素上。 */
+[class*="centerCol"], [class*="rightbarCol"] {
+  margin-top: 30px;
+}
+${isMac ? `
+/* macOS 红绿灯在左上角，侧栏也要让开：侧栏 slot 是 display:contents（无盒模型，
+   margin 不生效），故作用在其第一个可见子元素上。 */
 [data-slot="sidebar"] > :first-child {
-  margin-top: ${isMac ? "10px" : "0"};
+  margin-top: 10px;
 }
-/* Windows：顶部右侧控件左移，避开右上角窗口按钮（46px × 3 = 138px） */
-${isMac ? "" : `
-[class*="_titleRow"] {
-  padding-right: 138px;
-}
-`}
+` : ""}
 `;
 			document.head.appendChild(style);
 
@@ -99,3 +101,62 @@ ${isMac ? "" : `
 		return module.exports;
 	}
 });
+
+// ── 浏览器侧兜底：webview 可能把非 http(s) 的 window.open / 自定义 scheme 链接
+//    / location 导航交给系统打开，触发「选择应用」对话框。统一拦截并记录。
+//    原属已下线的 @iyam/dsh-file-handler（与文件预览无关，属浏览器侧通用加固），
+//    迁到本插件；文件级执行，只要插件被加载即生效，不依赖任何运行时服务。 ──
+const ALLOWED_URL = /^(https?:|data:|blob:|about:|javascript:|#)/i;
+const origWindowOpen = window.open.bind(window);
+window.open = function (url, ...rest) {
+	const u = String(url ?? "");
+	// 仅拦截带 scheme 且非白名单的地址（自定义 scheme）；相对地址放行，避免误伤 SPA 路由
+	if (u && !ALLOWED_URL.test(u) && /^[a-z][a-z0-9+.-]*:/i.test(u)) {
+		return null;
+	}
+	return origWindowOpen(url, ...rest);
+};
+document.addEventListener(
+	"click",
+	(e) => {
+		const el = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+		if (!el) return;
+		const href = el.getAttribute("href") || "";
+		if (!href || ALLOWED_URL.test(href)) return;
+		e.preventDefault();
+		e.stopPropagation();
+	},
+	true
+);
+// 拦截 location 导航（location.href= / assign / replace）到自定义 scheme。
+// 仅拦截"带 scheme 且非白名单"的地址（如 dsh://、app://、file://），避免 WebView2
+// 把自定义 scheme 交给系统弹「选择应用」对话框。无 scheme 的相对地址（/path、./path）
+// 是 SPA 内部路由，必须放行，否则"添加模型后返回列表"等相对跳转被误拦 → 界面不刷新。
+const blockScheme = (url) => {
+	const u = String(url || "");
+	if (!u) return false;
+	if (ALLOWED_URL.test(u)) return false;
+	if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) return false; // 无 scheme → 内部路由，放行
+	return true;
+};
+const loc = window.Location?.prototype;
+if (loc) {
+	const hrefDesc = Object.getOwnPropertyDescriptor(loc, "href");
+	if (hrefDesc && hrefDesc.set) {
+		Object.defineProperty(loc, "href", {
+			configurable: true,
+			enumerable: true,
+			get: hrefDesc.get,
+			set(v) { if (!blockScheme(v)) hrefDesc.set.call(this, v); },
+		});
+	}
+	for (const m of ["assign", "replace"]) {
+		if (typeof loc[m] === "function") {
+			const orig = loc[m];
+			loc[m] = function (url) {
+				if (blockScheme(url)) return undefined;
+				return orig.apply(this, arguments);
+			};
+		}
+	}
+}

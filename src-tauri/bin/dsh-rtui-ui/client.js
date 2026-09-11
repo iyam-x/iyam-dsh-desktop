@@ -325,8 +325,6 @@ window.__ModuleLoader__.load({
       const ac = accent || "#4D6BFE";
       return `
 :root {
-  /* 顶部右侧为 frameless 窗口的 Windows 系统按钮预留空间,避让 dsh 头部工具区。 */
-  --rtui-sysbar: 128px;
   --rtui-accent: ${ac};
 }
 /* 焦点环(无障碍): 用强调色描边键盘焦点 */
@@ -348,59 +346,7 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
 /* 滚动条细窄化 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { border-radius: 4px; }
-/* 头部右上工具区右移,避让 Windows 系统按钮 */
-.wSkVaW_headerUtilities { padding-right: var(--rtui-sysbar); }
 `;
-    }
-
-    // ── 主题同步给桌面壳 ──
-    // DSH 主题 token 注在 iframe 内部 DOM，壳(预览面板/编辑器)读不到；解析出当前生效
-    // 实色后 postMessage 给父窗口，壳据此着色，消除"预览像另一个 App"的割裂感。
-    function lum(c) {
-      c = (c || "").trim();
-      let r = 0, g = 0, b = 0;
-      if (c[0] === "#") {
-        const m = c.slice(1);
-        if (m.length === 3) { r = parseInt(m[0] + m[0], 16); g = parseInt(m[1] + m[1], 16); b = parseInt(m[2] + m[2], 16); }
-        else { r = parseInt(m.slice(0, 2), 16); g = parseInt(m.slice(2, 4), 16); b = parseInt(m.slice(4, 6), 16); }
-      } else if (c.startsWith("rgb")) {
-        const n = c.match(/\d+(\.\d+)?/g) || [0, 0, 0];
-        r = +n[0]; g = +n[1]; b = +n[2];
-      } else return 0.5;
-      const f = (x) => { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
-      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
-    }
-
-    function syncThemeToShell(values) {
-      const preset = values.preset || "graphite";
-      const p = PALETTES[preset] || PALETTES.graphite;
-      const accent = values.accent || "#4D6BFE";
-      const tokens = expandTokens(preset, { accent, sidebarContrast: values.sidebarContrast || "slightly" });
-      // dsh-client-ui-layout 把合成后的主题 token 写到 document.body.style（而非 :root），
-      // 故必须从 body 读取"已生效"实色——否则读到的只是 :root 上的官方基础主题，
-      // 自定义预设/强调色在壳侧（dock/编辑器）毫无反应。亮暗以 documentElement.style.colorScheme 为准。
-      let dark = document.documentElement.style.colorScheme === "dark";
-      const readVar = (name) => {
-        try { return getComputedStyle(document.body).getPropertyValue(name).trim(); } catch (_e) { return ""; }
-      };
-      const resolvedBg = readVar("--dsw-alias-bg-base");
-      // 兜底亮暗判定：用 body 上已解析的 bg-base 与 palette 亮/暗比对（colorScheme 不可用时）。
-      if (resolvedBg) {
-        const lr = lum(resolvedBg), ld = lum(p.dark.bg), ll = lum(p.light.bg);
-        dark = Math.abs(lr - ld) <= Math.abs(lr - ll);
-      }
-      const pick = (t) => (t && typeof t === "object") ? (dark ? t.dark : t.light) : t;
-      const eff = (name, fallback) => readVar(name) || fallback;
-      const colors = {
-        bg: eff("--dsw-alias-bg-base", pick(tokens["--dsw-alias-bg-base"])),
-        layer: eff("--dsw-alias-bg-layer-1", pick(tokens["--dsw-alias-bg-layer-1"])),
-        label: eff("--dsw-alias-label-primary", pick(tokens["--dsw-alias-label-primary"])),
-        label2: eff("--dsw-alias-label-secondary", pick(tokens["--dsw-alias-label-secondary"])),
-        border: eff("--dsw-alias-border-l2", pick(tokens["--dsw-alias-border-l2"])),
-      };
-      try {
-        parent.postMessage({ source: "iyam-dsh-theme", type: "theme", dark, accent, colors }, "*");
-      } catch (_e) { /* 壳未就绪时静默 */ }
     }
 
     let lastValues = null;
@@ -435,14 +381,13 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
         });
         disposeLayer = ctx.theme.overrideTokens(THEME_SOURCE, tokens);
       };
-      // 统一入口：记录当前值 + 应用主题 + 刷新结构性 CSS + 同步壳。既供快照应用，
+      // 统一入口：记录当前值 + 应用主题 + 刷新结构性 CSS。既供快照应用，
       // 也供设置面板动作的"乐观应用"——立即生效，不依赖 host 写→读→subscribe 往返。
       const applyValues = (values) => {
         currentValues = values;
         lastValues = values;
         applyTheme(values);
         injectStyle();
-        syncThemeToShell(values);
       };
       const applyFromSnapshot = (snap) => {
         const user = (snap && snap.user) || {};
@@ -461,21 +406,6 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
         const snap = scope.getSnapshot();
         applyFromSnapshot(snap);
       });
-      // 壳请求主题：预览 dock 打开时壳 postMessage 过来，立即回发当前主题，
-      // 消除"dock 已打开但还没收到首条主题消息"的时序问题。
-      window.addEventListener("message", (e) => {
-        const d = e.data;
-        if (!d || d.source !== "iyam-dsh" || d.type !== "request-theme") return;
-        try {
-          const user = scope.getSnapshot().user || {};
-          syncThemeToShell({
-            enabled: user.enabled !== false,
-            preset: user.preset || "graphite",
-            accent: user.accent || "#4D6BFE",
-            sidebarContrast: user.sidebarContrast || "slightly",
-          });
-        } catch (_e) { /* 快照不可用时静默 */ }
-      });
       // 乐观应用：在写 host 之前先按新值刷新主题，保证用户一操作就立即看到变化。
       const optimistic = (patch) => {
         applyValues({
@@ -487,16 +417,6 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
       const injected = (actions) => {
         bound = actions;
         applyFromSnapshot(scope.getSnapshot());
-        // 兜底：壳(父窗口)可能错过首条主题消息，iframe 完全加载后再补发一次，
-        // 保证预览面板拿到初始主题。
-        const resend = () => syncThemeToShell({
-          enabled: true,
-          preset: scope.getSnapshot().user?.preset || "graphite",
-          accent: scope.getSnapshot().user?.accent || "#4D6BFE",
-          sidebarContrast: scope.getSnapshot().user?.sidebarContrast || "slightly",
-        });
-        if (document.readyState === "complete") resend();
-        else window.addEventListener("load", resend, { once: true });
         return {
           setEnabled: (v) => { optimistic({ enabled: v }); scope.set("enabled", v); },
           setPreset: (v) => { optimistic({ preset: v }); scope.set("preset", v); },

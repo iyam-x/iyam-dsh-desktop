@@ -77,7 +77,7 @@ iyam-dsh-desktop (Tauri v2)
 ├── Rust 后端：进程管理、首次启动按需下载并部署 Node + DSH 到 ~/.dsh/
 ├── React 前端：状态 UI（Installing / Loading / Ready / Error / Crashed）
 ├── 运行时下载器（downloader.rs）：Node 归档镜像回退 + npm 全局安装 @deepseek-ai/dsh
-├── 内置体验插件：dsh-shell-plugin / dsh-rtui-ui / dsh-file-handler（随壳分发）
+├── 内置体验插件：dsh-shell-plugin / dsh-rtui-ui（随壳分发）
 └── 嵌入 DSH Web UI：WebView 直连 http://127.0.0.1:<port>
 ```
 
@@ -86,7 +86,7 @@ iyam-dsh-desktop (Tauri v2)
   - 经 npmmirror → 腾讯云 → 华为云 → nodejs.org 下载 Node 24 归档并解压到 `~/.dsh/node/`；
   - 用托管 Node 的 npm 以全局布局（`-g --prefix ~/.dsh`）安装 `@deepseek-ai/dsh`，registry 依次回退 npmmirror → 腾讯云 → 华为云 → npmjs，约 1~2 分钟；
   - 生成独立启动脚本 `~/.dsh/bin/dsh`（Windows 为 `dsh.cmd`）：直接用托管 Node 运行 `lib/bin.js`，不依赖系统 PATH / shebang；
-  - 把三个内置插件部署到 `~/.dsh/lib/node_modules/@iyam/`，并在 `~/.dsh/profiles/node_modules/@iyam/` 建软链，供 dsh 的 profile 插件树解析（dsh 只为其自身依赖闭包建软链，`@iyam/*` 需由 app 补建）；
+  - 把两个内置插件部署到 `~/.dsh/lib/node_modules/@iyam/`，并在 `~/.dsh/profiles/node_modules/@iyam/` 建软链，供 dsh 的 profile 插件树解析（dsh 只为其自身依赖闭包建软链，`@iyam/*` 需由 app 补建）；
   - 首次运行 `dsh plugin` 时按需用托管 npm 预装 `pnpm` 到托管 Node 目录，并注入 PATH（GUI 启动的应用没有用户 shell 的 PATH，找不到 pnpm）。
 2. **后续启动**：直接复用 `~/.dsh/` 本地安装，秒级启动，不再下载。
 3. **进程管理**：用托管 node spawn `lib/bin.js web --port 0`，监听 stdout 捕获带认证 token 的访问 URL（dsh ≥ 0.1.2-rc.1 全站认证），通过 Tauri Event 通知前端；运行中进程的 dsh 版本与磁盘不一致（升级提升后旧进程常驻）时强制重启对齐。
@@ -94,6 +94,7 @@ iyam-dsh-desktop (Tauri v2)
 5. **升级（备货机制）**：「检查更新」发现 registry 有新版本时，后台把新版本装到 `~/.dsh/.staging`，写 `.update.json`；下次启动提升（apply）到正式目录，失败自动回滚到上一可用版本。版本未变不会重新下载。
 6. **安装自愈**：探测/启动统一用「托管 node + `bin.js`」直跑，绕开 npm 生成软链与 shebang 的坑；安装后校验入口确实可运行（`bin.js --version`），若入口损坏（如镜像分发坏 tarball）则自动从 npmjs `--prefer-online` 重装，绕过本地被污染的 npm 缓存。
 7. **插件自愈**：启动失败时从 stderr 解析肇事第三方插件并自动禁用重试（点不出肇事者则禁用全部第三方插件兜底），保证 DSH 必然能启动；被禁插件记入 `~/.dsh/.quarantine.json`，dsh 版本变化后自动恢复重试。
+8. **本 app 自身的更新（检查 + 引导下载）**：启动时自动检查（24h 节流，离线/失败静默），标题栏下拉菜单也可手动「检查应用更新」。做法是拉 GitHub `releases/latest` 的 tag 与当前版本（编译期写入，与发布 tag 同源）比对：有新版则弹系统通知，菜单里给出「前往下载」直接打开 Release 页，由用户手动安装——原生安装包（NSIS / dmg / AppImage）无法在应用内覆盖自身，故不做静默自更新。注意该能力只对**已包含它的版本**生效：升级到本版本之前的老版本仍需手动装一次。
 
 不读取系统 node、不读取系统全局安装的 dsh（除非用户自行安装且经探测选用）。手动终端使用可通过 `~/.dsh/bin/dsh`（Windows 为 `dsh.cmd`）。
 
@@ -107,8 +108,8 @@ iyam-dsh-desktop/
 │   └── fetch-node.mjs            # 拉取当前平台 Node 归档（CI 与本地预缓存用）
 ├── src/                          # React 前端
 ├── src-tauri/
-│   ├── bin/dsh-{shell,rtui-ui,file-handler}/  # 内置体验插件（随壳分发）
-│   ├── src/{main,installer,process,process_state,downloader,updater,notify,window,aumid,file_preview}.rs
+│   ├── bin/dsh-{shell,rtui-ui}/  # 内置体验插件（随壳分发）
+│   ├── src/{main,installer,process,process_state,downloader,updater,app_update,notify,window,aumid}.rs
 │   ├── tauri.conf.json           # 窗口、bundle、安全配置（+ tauri.macos.conf.json 平台覆盖）
 │   ├── capabilities/             # 权限策略
 │   └── build.rs                  # 将内置插件打包进 app Resources（不含 DSH/Node）
@@ -125,7 +126,6 @@ iyam-dsh-desktop/
 | Cordis 插件系统 | ✅ 完整保留 |
 | DSH 内核升级 | 自动备货最新版，下次启动生效；失败自动回滚、不兼容插件自动隔离 |
 | dsh web 认证（≥ 0.1.2-rc.1） | ✅ 自动适配：token 直取界面 + 本机回环放行 API（对 dsh 打幂等补丁，见 PLAN.md 问题记录 13/14） |
-| 文件内联预览（dsh ≥ 0.1.2-rc.1） | ⚠️ 暂不可用（上游移除了客户端 openPath 服务，待重新适配；旧版 dsh 不受影响） |
 
 ## 风险提示
 

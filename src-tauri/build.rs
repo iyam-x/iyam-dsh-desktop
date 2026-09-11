@@ -10,7 +10,6 @@ fn main() {
     // Tell cargo to rerun this script when bundled resources change
     println!("cargo:rerun-if-changed=bin/dsh-shell-plugin");
     println!("cargo:rerun-if-changed=bin/dsh-rtui-ui");
-    println!("cargo:rerun-if-changed=bin/dsh-file-handler");
     println!("cargo:rerun-if-changed=tauri.conf.json");
 
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -37,16 +36,6 @@ fn main() {
             .unwrap_or_else(|e| panic!("Failed to copy rtui-ui plugin to app resources: {}", e));
     } else {
         println!("cargo:warning=WARNING: bin/dsh-rtui-ui not found, rtui-ui plugin will not be bundled");
-    }
-
-    // 文件查看插件（包装 openPath，转发文件点击给桌面壳做内联预览）
-    let fh_src = Path::new("bin/dsh-file-handler");
-    if fh_src.exists() {
-        println!("cargo:warning=Bundling file-handler plugin into app resources");
-        copy_dir_all(fh_src, &dest_path.parent().unwrap().join("dsh-file-handler"), &mut std::collections::HashSet::new())
-            .unwrap_or_else(|e| panic!("Failed to copy file-handler plugin to app resources: {}", e));
-    } else {
-        println!("cargo:warning=WARNING: bin/dsh-file-handler not found, file-handler plugin will not be bundled");
     }
 
     // Node 运行时与 dsh 包不再打包进安装包（见 PLAN）：首次启动由 app 运行时下载。

@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
+import { open } from "@tauri-apps/plugin-shell";
 
 // 下拉箭头用内联 SVG 渲染，跨平台一致（不依赖 Windows 专属的 Segoe MDL2 字体）。
 function ChevronDown() {
@@ -30,6 +31,14 @@ type UpdateInfo = {
   latest: string;
   has_update: boolean;
   managed: boolean;
+};
+
+// 本 app 自身的更新状态（原生安装包，只能引导到 Releases 手动装）。
+type AppUpdateInfo = {
+  current: string;
+  latest: string;
+  has_update: boolean;
+  url: string;
 };
 
 type ToastAction = { label: string; onClick: () => void };
@@ -84,7 +93,7 @@ export function TitleBarUpdateButton() {
     try {
       return await invoke<UpdateInfo>("check_for_update");
     } catch (err) {
-      showToast(`检查更新失败：${String(err ?? "未知错误")}`, "err");
+      showToast(`检查 dsh 更新失败：${String(err ?? "未知错误")}`, "err");
       return null;
     }
   }
@@ -98,18 +107,46 @@ export function TitleBarUpdateButton() {
 
     const items: Array<MenuItem | PredefinedMenuItem> = [];
 
-    // 「检查更新」：应用内 toast 反馈（正在检查 → 结果），不再二次弹菜单。
+    // 「检查应用更新」：本 app 自身的新版本（原生安装包无法在应用内覆盖自身，
+    // 只能引导到 GitHub Releases 手动下载安装）；与下方 dsh 内核的备货式升级分开列。
     items.push(
       await MenuItem.new({
-        text: "检查更新",
+        text: "检查应用更新",
         action: async () => {
-          showToast("正在检查更新…", "info");
+          showToast("正在检查应用更新…", "info");
+          try {
+            const r = await invoke<AppUpdateInfo>("check_app_update", { force: true });
+            if (r.has_update) {
+              showToast(
+                `应用有新版本 v${r.current} → v${r.latest}`,
+                "ok",
+                { label: "前往下载", onClick: () => void open(r.url).catch(() => {}) },
+                true // sticky：等用户决定，不自动消失
+              );
+            } else {
+              showToast(`应用已是最新版本 v${r.current}`, "ok");
+            }
+          } catch (err) {
+            showToast(`检查应用更新失败：${String(err ?? "未知错误")}`, "err");
+          }
+        },
+      })
+    );
+    items.push(await PredefinedMenuItem.new({ item: "Separator" }));
+
+    // 「检查 dsh 更新」：dsh 内核的备货式升级（下载到暂存区，下次启动生效）。
+    // 应用内 toast 反馈（正在检查 → 结果），不再二次弹菜单。
+    items.push(
+      await MenuItem.new({
+        text: "检查 dsh 更新",
+        action: async () => {
+          showToast("正在检查 dsh 更新…", "info");
           const r = await doCheck();
           if (r) {
             showToast(
               r.has_update
-                ? `发现新版本 v${r.installed} → v${r.latest}`
-                : `已是最新版本 v${r.installed}`,
+                ? `dsh 有新版本 v${r.installed} → v${r.latest}`
+                : `dsh 已是最新版本 v${r.installed}`,
               "ok"
             );
           }
@@ -121,7 +158,7 @@ export function TitleBarUpdateButton() {
       items.push(
         await PredefinedMenuItem.new({ item: "Separator" }),
         await MenuItem.new({
-          text: `检查更新失败：${errMsg ?? "无返回"}`,
+          text: `检查 dsh 更新失败：${errMsg ?? "无返回"}`,
           enabled: false,
         })
       );
@@ -129,7 +166,7 @@ export function TitleBarUpdateButton() {
       items.push(
         await PredefinedMenuItem.new({ item: "Separator" }),
         await MenuItem.new({ text: `dsh  当前 v${info.installed}`, enabled: false }),
-        await MenuItem.new({ text: `最新 v${info.latest}`, enabled: false }),
+        await MenuItem.new({ text: `dsh  最新 v${info.latest}`, enabled: false }),
         await PredefinedMenuItem.new({ item: "Separator" })
       );
 
@@ -192,7 +229,7 @@ export function TitleBarUpdateButton() {
           );
         }
       } else {
-        items.push(await MenuItem.new({ text: "已是最新版本", enabled: false }));
+        items.push(await MenuItem.new({ text: "dsh 已是最新版本", enabled: false }));
       }
     }
 
@@ -220,8 +257,8 @@ export function TitleBarUpdateButton() {
         className="tb-btn tb-update"
         onClick={handleClick}
         onMouseDown={stopDragPropagation}
-        aria-label="检查 dsh 更新"
-        title="检查 dsh 更新"
+        aria-label="检查更新"
+        title="检查更新"
       >
         <ChevronDown />
       </button>

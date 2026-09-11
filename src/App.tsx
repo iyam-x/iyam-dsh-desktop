@@ -1,9 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import { TitleBar } from "./components/TitleBar";
-import { PreviewDock, DEFAULT_THEME, type Preview, type ThemeState } from "./components/PreviewDock";
 import "./App.css";
 
 type AppStatus = "installing" | "loading" | "ready" | "crashed" | "error";
@@ -18,80 +16,20 @@ interface InstallState {
   kind?: "install" | "launch";
 }
 
-const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"]);
-const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac", "opus", "weba"]);
-const VIDEO_EXTS = new Set(["mp4", "webm", "mov", "m4v"]);
-
-const MIME: Record<string, string> = {
-  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
-  webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp", avif: "image/avif", ico: "image/x-icon",
-  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", oga: "audio/ogg", m4a: "audio/mp4",
-  flac: "audio/flac", aac: "audio/aac", opus: "audio/opus", weba: "audio/webm",
-  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", m4v: "video/mp4",
-};
-
-const DOCK_MIN = 320;
-const DOCK_MAX = 760;
-const DOCK_DEFAULT = 460;
-const DOCK_STORAGE_KEY = "iyam-dsh-dock-width";
-
 // 手动启动 DSH 的终端命令：Windows 下安装的包装脚本是 dsh.cmd，其余平台是 dsh。
 const DSH_CLI = /Windows/i.test(navigator.userAgent) ? "dsh.cmd" : "dsh";
-
-function loadDockWidth(): number {
-  try {
-    const raw = localStorage.getItem(DOCK_STORAGE_KEY);
-    if (raw) {
-      const n = parseInt(raw, 10);
-      if (!Number.isNaN(n)) return Math.min(DOCK_MAX, Math.max(DOCK_MIN, n));
-    }
-  } catch {
-    /* localStorage 不可用时退回默认 */
-  }
-  return DOCK_DEFAULT;
-}
 
 export default function App() {
   const [state, setState] = useState<InstallState>({
     status: "loading",
     message: "正在初始化...",
   });
-  const [preview, setPreview] = useState<Preview | null>(null);
-  const [theme, setTheme] = useState<ThemeState>(DEFAULT_THEME);
-  const [dockWidth, setDockWidth] = useState<number>(loadDockWidth);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const closePreview = () => setPreview(null);
   // 标记应用正在退出（用户主动退出），用于抑制退出时 DSH 进程被杀触发的崩溃卡片一闪。
   const exitingRef = useRef(false);
   // 启动完成后是否展示「安装插件市场」询问弹窗（仅当 dshmarket 尚未安装时）。
   const [marketOffer, setMarketOffer] = useState(false);
   const [marketInstalling, setMarketInstalling] = useState(false);
   const [marketError, setMarketError] = useState<string | null>(null);
-
-  // 打开 DSH 转发来的文件预览：按扩展名分图片/音视频(读二进制)与文本/代码(读全文)。
-  async function openPreview(path: string) {
-    // 向 DSH iframe 请求一次当前主题（dsh-rtui-ui 收到后回发），
-    // 保证 dock 一打开就跟随主题，不受首次消息时序影响。
-    iframeRef.current?.contentWindow?.postMessage(
-      { source: "iyam-dsh", type: "request-theme" },
-      "*"
-    );
-    const name = path.split(/[\\/]/).pop() || path;
-    const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
-    try {
-      if (IMAGE_EXTS.has(ext) || AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext)) {
-        const data = await invoke<{ base64: string }>("read_file_data", { path });
-        const kind = IMAGE_EXTS.has(ext) ? "image" : AUDIO_EXTS.has(ext) ? "audio" : "video";
-        const mime = MIME[ext] || "application/octet-stream";
-        setPreview({ kind, name, path, dataUrl: `data:${mime};base64,${data.base64}` });
-      } else {
-        const data = await invoke<{ content: string }>("read_text_file", { path });
-        setPreview({ kind: "text", name, path, content: data.content });
-      }
-    } catch (err) {
-      setPreview({ kind: "error", name, message: String(err) });
-    }
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -253,46 +191,23 @@ export default function App() {
     };
   }, []);
 
-  // DSH 文件内联预览桥：dsh-file-handler 插件把文件点击转发到这里，按类型读取并展示
+  // 启动后自动检查本 app 自身的更新（后端 24h 节流；离线/查不到一律静默）。
+  // 有新版才弹系统通知，且 force=true 跳过"窗口聚焦就不弹"的判断——新版本值得打断一次，
+  // 否则启动时窗口正聚焦，Windows 上这条提示等于不会出现。
   useEffect(() => {
-    const onMessage = (e: MessageEvent) => {
-      const data = e.data as { source?: string; type?: string; path?: string } | null;
-      if (!data || data.source !== "iyam-dsh-file" || data.type !== "file-open") return;
-      if (typeof data.path !== "string" || !data.path) return;
-      void openPreview(data.path);
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    invoke<{ current: string; latest: string; has_update: boolean }>("check_app_update", {
+      force: false,
+    })
+      .then((info) => {
+        if (!info.has_update) return;
+        return invoke("notify", {
+          force: true,
+          title: "iyam-dsh 有新版本",
+          body: `应用更新 v${info.current} → v${info.latest}，可在标题栏下拉菜单「检查应用更新」前往下载`,
+        });
+      })
+      .catch(() => {});
   }, []);
-
-  // DSH 主题同步：dsh-rtui-ui 插件把当前生效实色 postMessage 过来，
-  // 预览面板/编辑器据此着色，与 DSH 视觉统一（消除割裂感）。
-  useEffect(() => {
-    const onMessage = (e: MessageEvent) => {
-      const data = e.data as
-        | { source?: string; type?: string; dark?: boolean; accent?: string; colors?: ThemeState["colors"] }
-        | null;
-      if (!data || data.source !== "iyam-dsh-theme" || data.type !== "theme") return;
-      if (!data.colors || typeof data.accent !== "string") return;
-      setTheme({
-        dark: data.dark === true,
-        accent: data.accent,
-        colors: data.colors,
-      });
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, []);
-
-  // Esc 关闭预览
-  useEffect(() => {
-    if (!preview) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPreview(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [preview]);
 
   // 开发者工具：F12 / Cmd(Ctrl)+Shift+I（壳聚焦时直接响应；DSH iframe 内聚焦时由
   // dsh-rtui-ui 插件 postMessage 转发）。release 构建需 tauri `devtools` 特性。
@@ -317,16 +232,6 @@ export default function App() {
     };
   }, []);
 
-  // 预览面板宽度变化：记忆到 localStorage，下次打开保持。
-  const handleResize = (w: number) => {
-    setDockWidth(w);
-    try {
-      localStorage.setItem(DOCK_STORAGE_KEY, String(w));
-    } catch {
-      /* 忽略持久化失败 */
-    }
-  };
-
   // 用户确认安装插件市场 dshmarket（后端幂等：已装跳过；失败回传错误）。
   async function installMarket() {
     setMarketInstalling(true);
@@ -350,7 +255,7 @@ export default function App() {
     const heading = state.kind === "install" ? "安装失败" : "启动失败";
     return (
       <div className="app-shell">
-        <TitleBar rightOffset={preview ? dockWidth : 0} />
+        <TitleBar />
         <div className="app error">
           <div className="error-card">
             <div className="error-icon">⚠</div>
@@ -371,7 +276,7 @@ export default function App() {
   if (state.status === "crashed") {
     return (
       <div className="app-shell">
-        <TitleBar rightOffset={preview ? dockWidth : 0} />
+        <TitleBar />
         <div className="app crashed">
           <div className="error-card">
             <div className="error-icon">⚡</div>
@@ -394,7 +299,7 @@ export default function App() {
     const pct = Math.round((state.progress ?? 0) * 100);
     return (
       <div className="app-shell">
-        <TitleBar rightOffset={preview ? dockWidth : 0} />
+        <TitleBar />
         <div className="app installing">
           <div className="install-card">
             <div className="spinner" />
@@ -419,7 +324,7 @@ export default function App() {
   if (state.status === "loading") {
     return (
       <div className="app-shell">
-        <TitleBar rightOffset={preview ? dockWidth : 0} />
+        <TitleBar />
         <div className="app loading">
           <div className="install-card">
             <div className="spinner" />
@@ -431,29 +336,17 @@ export default function App() {
     );
   }
 
-  // Ready — embed DSH web UI，预览作为右侧停靠面板与其同屏。
+  // Ready — embed DSH web UI。
   return (
     <div className="app-shell">
-      <TitleBar rightOffset={preview ? dockWidth : 0} />
+      <TitleBar />
       <div className="app ready">
         <iframe
           src={state.url}
           title="DeepSeek Harness"
           className="webview"
-          ref={iframeRef}
           style={state.exiting ? { display: "none" } : undefined}
         />
-        {preview && (
-          <PreviewDock
-            preview={preview}
-            theme={theme}
-            width={dockWidth}
-            minWidth={DOCK_MIN}
-            maxWidth={DOCK_MAX}
-            onClose={closePreview}
-            onResize={handleResize}
-          />
-        )}
       </div>
       {marketOffer && (
         <div className="modal-overlay" onClick={declineMarket}>

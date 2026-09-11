@@ -1,5 +1,5 @@
 // 服务端 no-op：仅作为 bundle 的 Cordis 插件入口存在，
-// 实际逻辑全部在 client.js（向 DSH web UI 注入平台布局 CSS）。
+// 实际逻辑全部在 client.js（布局 CSS + 会话通知桥 + 自定义 scheme 导航兜底）。
 const name = "dsh-desktop-shell";
 const inject = [];
 

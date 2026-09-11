@@ -6,8 +6,8 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use tauri::Emitter;
 
 mod aumid;
+mod app_update;
 mod downloader;
-mod file_preview;
 mod installer;
 mod notify;
 mod process;
@@ -131,13 +131,11 @@ fn main() {
             process::stop_dsh,
             updater::check_for_update,
             updater::trigger_dsh_update,
+            app_update::check_app_update,
             window::show_system_menu,
             window::open_devtools,
             tray_commands::restart_dsh,
             notify::notify,
-            file_preview::read_text_file,
-            file_preview::read_file_data,
-            file_preview::write_text_file,
             installer::install_dshmarket,
             app_commands::restart_app,
         ])
