@@ -8,17 +8,19 @@ window.__ModuleLoader__.load({
 		const inject = ["sessions"];
 
 		function apply(ctx) {
-			// 顶部让位系统按钮：只把**主内容列**下移一个标题栏高度（30px，见桌面壳
-			// src/index.css 的 --titlebar-h），右上角窗口按钮因此不压 dsh 头部工具区。
-			// 左侧栏不参与——Windows/Linux 的按钮只在右上角，侧栏保持贴窗口顶边（与
-			// 改动前一致）。主内容上方那条 30px 由 frame 自身的 bg-base 绘制，与头部
-			// 同色，无接缝（故无需壳层再画一条留白）。
-			const isMac = /mac|iphone|ipad/i.test(navigator.userAgent);
-			const style = document.createElement("style");
-			style.id = "iyam-dsh-shell-css";
-			style.textContent = `
+		// 顶栏让位：只把**主内容列**（center + rightbar）在 dsh 内部下移一个标题栏
+		// 高度（30px，见桌面壳 src/index.css 的 --titlebar-h），使右上角窗口三键不压
+		// dsh 头部工具区。左侧栏（sidebar）不参与——Win/Linux 的系统按钮只在右上角，
+		// 侧栏保持贴窗口顶边（与改动前一致）。主内容上方那条 30px 由 frame 自身
+		// 的 bg-base 绘制，与头部同色、无接缝，故无需壳层再画一条留白。
+		// 选择器用 dsh 源码里的列类名子串（centerCol / rightbarCol），跨构建稳定；
+		// 加 !important 以抵抗 dsh 自身样式的加载顺序，避免升级后被覆盖导致击穿。
+		const isMac = /mac|iphone|ipad/i.test(navigator.userAgent);
+		const style = document.createElement("style");
+		style.id = "iyam-dsh-shell-css";
+		style.textContent = `
 [class*="centerCol"], [class*="rightbarCol"] {
-  margin-top: 30px;
+  margin-top: 30px !important;
 }
 ${isMac ? `
 /* macOS 红绿灯在左上角，侧栏也要让开：侧栏 slot 是 display:contents（无盒模型，
@@ -28,7 +30,7 @@ ${isMac ? `
 }
 ` : ""}
 `;
-			document.head.appendChild(style);
+		document.head.appendChild(style);
 
 			// 会话通知桥：监听会话 running 边沿（true→false = 对话完成），以及
 			// pendingInteraction 出现（等待授权/审阅/回复），经 postMessage 转发给
