@@ -857,24 +857,29 @@ const PICKER_OWNER_PATCHED: &str =
 /// 第三方 cookie 处理，Strict cookie 既存不下也发不出，303 换 cookie 的路径在
 /// webview 中永远 401。改为 token 直取 index 后无需 cookie（仅 `/` 受认证保护，
 /// 资产与 /api 走 Host/Origin fence）；token 仍是访问凭据，安全语义不变。
-const WEB_AUTH_FROM: &str = concat!(
-    "const issuedAt = Date.now();\n",
-    "\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n",
-    "\t\t\t\tconst value = encodeCookie({\n",
-    "\t\t\t\t\tversion: COOKIE_PAYLOAD_VERSION,\n",
-    "\t\t\t\t\tauthority,\n",
-    "\t\t\t\t\tissuedAt,\n",
-    "\t\t\t\t\texpiresAt\n",
-    "\t\t\t\t}, this.secret);\n",
-    "\t\t\t\tres.writeHead(303, {\n",
-    "\t\t\t\t\t\"cache-control\": \"no-store\",\n",
-    "\t\t\t\t\t\"location\": \"/\",\n",
-    "\t\t\t\t\t\"referrer-policy\": \"no-referrer\",\n",
-    "\t\t\t\t\t\"set-cookie\": sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3))\n",
-    "\t\t\t\t});\n",
-    "\t\t\t\tres.end();\n",
-    "\t\t\t\treturn false;"
-);
+/// 构造 web-auth 补丁的精确匹配串。上游 0.1.7-rc.2 起 303 目标由 "/" 改为 "./"，
+/// 其余逐字不变，故仅 location 参数化；两个变体都尝试以兼容新旧引擎（含回滚）。
+fn web_auth_from(location: &str) -> String {
+    format!(
+        "const issuedAt = Date.now();\n\
+         \t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\
+         \t\t\t\tconst value = encodeCookie({{\n\
+         \t\t\t\t\tversion: COOKIE_PAYLOAD_VERSION,\n\
+         \t\t\t\t\tauthority,\n\
+         \t\t\t\t\tissuedAt,\n\
+         \t\t\t\t\texpiresAt\n\
+         \t\t\t\t}}, this.secret);\n\
+         \t\t\t\tres.writeHead(303, {{\n\
+         \t\t\t\t\t\"cache-control\": \"no-store\",\n\
+         \t\t\t\t\t\"location\": \"{location}\",\n\
+         \t\t\t\t\t\"referrer-policy\": \"no-referrer\",\n\
+         \t\t\t\t\t\"set-cookie\": sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3))\n\
+         \t\t\t\t}});\n\
+         \t\t\t\tres.end();\n\
+         \t\t\t\treturn false;",
+        location = location
+    )
+}
 const WEB_AUTH_TO: &str =
     "return true; /* iyam-dsh web-auth patch: valid token serves index directly */";
 
@@ -897,6 +902,25 @@ const WEB_AUTH_API_TO: &str = concat!(
     "\t} /* iyam-dsh api-auth patch: loopback peers exempted from cookie auth */"
 );
 
+/// 对单份 dsh-client-connection 源码内容打全部补丁（web-auth 新旧两变体 + api-auth）。
+/// 有改动返回 Some(新内容)；已是补丁态或上游结构不匹配则返回 None。
+fn patch_client_connection(content: &str) -> Option<String> {
+    let mut current = content.to_string();
+    let mut touched = false;
+    for (from, to) in [
+        (web_auth_from("/"), WEB_AUTH_TO),
+        (web_auth_from("./"), WEB_AUTH_TO),
+        (WEB_AUTH_API_FROM.to_string(), WEB_AUTH_API_TO),
+    ] {
+        if current.contains(to) || !current.contains(&from) {
+            continue; // 已补丁，或上游结构变化
+        }
+        current = current.replacen(&from, to, 1);
+        touched = true;
+    }
+    touched.then_some(current)
+}
+
 /// 为 dsh-client-connection 打 webview 认证适配补丁（幂等，见上方两处说明）。
 /// 返回是否有文件被实际修改——调用方据此判断运行中的旧进程需要重启才能生效。
 ///
@@ -917,32 +941,20 @@ pub(crate) fn ensure_web_auth_patch(home: &PathBuf) -> bool {
             .join("lib")
             .join("index.js"),
     ];
-    let patches: [(&str, &str); 2] = [
-        (WEB_AUTH_FROM, WEB_AUTH_TO),
-        (WEB_AUTH_API_FROM, WEB_AUTH_API_TO),
-    ];
     let mut changed = false;
     for target in &targets {
         let Ok(content) = fs::read_to_string(target) else {
             continue; // 该副本不存在（安装布局差异/未升级），跳过
         };
-        let mut current = content;
-        let mut touched = false;
-        for (from, to) in patches {
-            if current.contains(to) || !current.contains(from) {
-                continue; // 已补丁，或上游结构变化
+        let Some(patched) = patch_client_connection(&content) else {
+            continue;
+        };
+        match fs::write(target, patched) {
+            Ok(()) => {
+                log::info!("已为 dsh web 认证打适配补丁: {}", target.display());
+                changed = true;
             }
-            current = current.replacen(from, to, 1);
-            touched = true;
-        }
-        if touched {
-            match fs::write(target, current) {
-                Ok(()) => {
-                    log::info!("已为 dsh web 认证打适配补丁: {}", target.display());
-                    changed = true;
-                }
-                Err(e) => log::warn!("写 web 认证补丁失败({}): {e}", target.display()),
-            }
+            Err(e) => log::warn!("写 web 认证补丁失败({}): {e}", target.display()),
         }
     }
     if !changed {
@@ -1109,5 +1121,61 @@ pub(crate) async fn install_dshmarket(app: tauri::AppHandle) -> Result<(), Strin
         Ok(())
     } else {
         Err("dshmarket 安装失败（请检查网络后重试）".into())
+    }
+}
+
+#[cfg(test)]
+mod web_auth_patch_tests {
+    use super::*;
+
+    /// 真实上游样本（dsh-client-connection 0.1.7-rc.2）：token 换 cookie 后 303 到 "./"。
+    /// 缩进为 tab，与上游源码逐字一致（补丁依赖精确匹配）。
+    const UPSTREAM_RC2: &str = concat!(
+        "if (req.method === \"GET\" && url.pathname === \"/\" && tokens.length === 1) {\n",
+        "\t\t\t\tconst issuedAt = Date.now();\n",
+        "\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n",
+        "\t\t\t\tconst value = encodeCookie({\n",
+        "\t\t\t\t\tversion: COOKIE_PAYLOAD_VERSION,\n",
+        "\t\t\t\t\tauthority,\n",
+        "\t\t\t\t\tissuedAt,\n",
+        "\t\t\t\t\texpiresAt\n",
+        "\t\t\t\t}, this.secret);\n",
+        "\t\t\t\tres.writeHead(303, {\n",
+        "\t\t\t\t\t\"cache-control\": \"no-store\",\n",
+        "\t\t\t\t\t\"location\": \"./\",\n",
+        "\t\t\t\t\t\"referrer-policy\": \"no-referrer\",\n",
+        "\t\t\t\t\t\"set-cookie\": sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3))\n",
+        "\t\t\t\t});\n",
+        "\t\t\t\tres.end();\n",
+        "\t\t\t\treturn false;\n",
+        "}\n",
+        "\trequestRejection(request) {\n",
+        "\t\tif (!isTrustedApiRequest(request, this.trustedHosts)) return 403;\n",
+        "\t\treturn this.browserAuth.isAuthenticated(request) ? void 0 : 401;\n",
+        "\t}\n"
+    );
+
+    /// 旧上游样本（≤0.1.6）：同一段但 303 到 "/"。
+    fn upstream_old() -> String {
+        UPSTREAM_RC2.replace("\"location\": \"./\",", "\"location\": \"/\",")
+    }
+
+    #[test]
+    fn patches_rc2_dot_slash_location() {
+        let patched = patch_client_connection(UPSTREAM_RC2).expect("0.1.7-rc.2 变体应被补丁");
+        assert!(patched.contains(WEB_AUTH_TO));
+        assert!(patched.contains(WEB_AUTH_API_TO), "api 补丁应同时打上");
+    }
+
+    #[test]
+    fn patches_legacy_slash_location() {
+        let patched = patch_client_connection(&upstream_old()).expect("旧版变体应被补丁");
+        assert!(patched.contains(WEB_AUTH_TO));
+    }
+
+    #[test]
+    fn patch_is_idempotent() {
+        let once = patch_client_connection(UPSTREAM_RC2).unwrap();
+        assert!(patch_client_connection(&once).is_none(), "重复打补丁应为 no-op");
     }
 }

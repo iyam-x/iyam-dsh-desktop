@@ -4,6 +4,11 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.3] - 2026-09-28
+
+### 修复
+- **dsh 0.1.7-rc.2 起界面提示 "web authentication required"**：新版引擎把 token 认证的 303 重定向目标由 `/` 改为 `./`，壳层的 webview 认证适配补丁精确匹配落空、未打上，跨源 iframe 存不下 Strict cookie 导致 401。现补丁同时匹配新旧两种 303 形态（含引擎回滚场景），并新增对应回归测试。
+
 ## [1.0.2] - 2026-09-20
 
 ### 修复
