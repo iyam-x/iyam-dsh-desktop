@@ -238,7 +238,12 @@ window.__ModuleLoader__.load({
     }
 
     // ── 设置命名空间 ──
+    // SETTINGS_NS：locale 字典键（与 host 半段共享的历史命名）。
+    // SETTINGS_ENTRY：cordis profile 的 entry id（见 cordis.patch.yml 的 insert.id）。
+    // dsh 0.1.7-rc.2 起 settings 改为按插件 entry id serve，client 侧经
+    // configForms.get(entryId) 读写（旧 settingsScope 服务已移除）。
     const SETTINGS_NS = "dsh-rtui";
+    const SETTINGS_ENTRY = "dsh-rtui-ui";
     const THEME_SOURCE = "dsh-rtui-ui";
 
     function createCustomStore() {
@@ -362,11 +367,14 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
 
     function apply(ctx) {
       // 运行时服务缺失（dsh API 变更）时静默停用，避免抛错影响宿主。
-      if (!ctx || !ctx.settingsScope || !ctx.theme || !ctx.slots || !ctx.locale) {
+      if (!ctx || !ctx.configForms || !ctx.theme || !ctx.slots || !ctx.locale) {
         console.warn("[iyam/dsh-rtui-ui] 运行时服务不完整，主题插件已停用");
         return;
       }
-      const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NS });
+      // 0.1.7-rc.2：configForms.get(entryId) 取代 settingsScope.bind({namespace})。
+      // 表单控制器只在宿主已 serve 该 entry（host 半段 Config 导出激活）后才有值，
+      // 快照形如 { mode, value, revision }，value 即用户段。
+      const scope = ctx.configForms.get(SETTINGS_ENTRY);
       ctx.locale.register(SETTINGS_NS, { zh, en });
       const store = createCustomStore();
       let bound;
@@ -390,7 +398,7 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
         injectStyle();
       };
       const applyFromSnapshot = (snap) => {
-        const user = (snap && snap.user) || {};
+        const user = (snap && snap.value) || {};
         const values = {
           enabled: user.enabled !== false,
           preset: user.preset || "graphite",
@@ -436,7 +444,7 @@ svg circle[class*="_track"] { stroke: var(--dsw-alias-border-l3) !important; }
     }
 
     exports.apply = apply;
-    exports.inject = ["theme", "slots", "locale", "settingsScope", "connection", "remote"];
+    exports.inject = ["theme", "slots", "locale", "configForms", "connection", "remote"];
     return module.exports;
   },
 });

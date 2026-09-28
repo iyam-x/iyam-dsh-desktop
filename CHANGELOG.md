@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.4] - 2026-09-28
+
+### 修复
+- **dsh 0.1.7-rc.2 起启动报 "Failed to load plugins: @iyam/dsh-rtui-ui: pending (waiting for service: settingsScope)"**：新版引擎重建设置体系——client 侧 `settingsScope` 服务被 `configForms` 取代（`ctx.configForms.get(entryId)`，快照 `value` 取代 `user`），host 侧 `settings.register` 被插件 `Config` 导出取代（字段须 `.volatile()`）。主题插件已迁移到新契约。
+- 注意：设置存储命名空间由自注册的 `dsh-rtui` 变为 profile entry id `dsh-rtui-ui`，升级后自定义主题设置（强调色/预设等）会重置一次为默认值。
+
 ## [1.0.3] - 2026-09-28
 
 ### 修复

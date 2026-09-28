@@ -1,15 +1,21 @@
-// dsh-rtui-ui node half (host 侧): 注册持久化的自定义主题设置命名空间。
-// 浏览器 client 半段(exports["./client"] → client.js)通过 ctx.settingsScope
-// 读写该 namespace; 此处把 namespace 在 host 的 settings 服务里登记为可写、可持久化，
-// 否则 settings.update 会因 "not registered" 被静默丢弃(对比度/强调色无反应)。
+// dsh-rtui-ui node half (host 侧): 声明本插件的可持久化设置 schema。
+// 浏览器 client 半段(exports["./client"] → client.js)通过 ctx.configForms.get(entryId)
+// 读写该 schema 产生的表单。
+//
+// dsh 0.1.7-rc.2 起设置体系重建：旧的 `settingsCtx.settings.register(ns, schema)`
+// 已移除，改由 cordis 插件 Config 驱动——插件导出 `Config`（schemastery schema），
+// settings describe 按 profile entry id（cordis.patch.yml 的 insert.id = "dsh-rtui-ui"）
+// serve 表单，字段必须 `.volatile()` 才会成为可编辑/可持久化字段（对照官方
+// dsh-client-ui-theme 的做法）。
 //
 // 可用性契约：本模块是 app 内置插件，被 `is_core_bundle` 保护、每次启动强制刷新，
-// 一旦抛错将拖垮整棵 dsh 且无法被自动隔离。因此**禁止静态 import dsh 内部包**
-// （dsh 升级常移除/改名内部导出，静态 import 在 ESM 链接期即抛错），一律动态
-// import + 全程守卫：任何失败只降级为「主题设置不持久化」，绝不阻断 dsh 启动。
+// 一旦抛错将拖垮整棵 dsh 且无法被自动隔离。schemastery 是 dsh-settings 自身的
+// 硬依赖（官方 ui-theme 亦静态 import），不属「易被改名移除的 dsh 内部包」。
+import z from "@deepseek-ai/schemastery";
+
 export const name = "dsh-rtui-ui";
 
-/** Host 与浏览器共享的命名空间; 须与 client.js 的 SETTINGS_NS 完全一致。 */
+/** Host 与浏览器共享的历史命名空间; 须与 client.js 的 SETTINGS_NS 完全一致。 */
 const RTUI_SETTINGS_NAMESPACE = "dsh-rtui";
 
 /** 与 client.js 默认值保持一致的字段缺省值。 */
@@ -23,33 +29,22 @@ const RTUI_DEFAULTS = {
   density: "comfortable",
 };
 
-function apply(ctx) {
-  ctx.inject(["settings"], (settingsCtx) => {
-    import("@deepseek-ai/schemastery")
-      .then((mod) => {
-        const z = mod.default ?? mod;
-        const schema = z.object({
-          enabled: z.boolean().default(RTUI_DEFAULTS.enabled),
-          preset: z.string().default(RTUI_DEFAULTS.preset),
-          accent: z.string().default(RTUI_DEFAULTS.accent),
-          sidebarContrast: z.string().default(RTUI_DEFAULTS.sidebarContrast),
-          font: z.string().default(RTUI_DEFAULTS.font),
-          radius: z.string().default(RTUI_DEFAULTS.radius),
-          density: z.string().default(RTUI_DEFAULTS.density),
-        });
-        try {
-          // dsh 0.1.2-rc.1 起 register 直接收 namespace 字符串（旧版收
-          // settingsNamespace(ns) 对象，该导出已随版本移除）。签名再变时
-          // register 抛错会被下方捕获，仅失去持久化，不影响主题生效。
-          settingsCtx.settings.register(RTUI_SETTINGS_NAMESPACE, schema);
-        } catch (e) {
-          console.warn("[iyam/dsh-rtui-ui] settings.register 失败，主题设置不持久化:", e);
-        }
-      })
-      .catch((e) => {
-        console.warn("[iyam/dsh-rtui-ui] schemastery 不可用，跳过设置注册:", e);
-      });
-  });
+/** 可持久化的用户偏好（.volatile() 字段才会出现在 settings 表单里）。 */
+const Config = z.object({
+  enabled: z.boolean().default(RTUI_DEFAULTS.enabled).volatile(),
+  preset: z.string().default(RTUI_DEFAULTS.preset).volatile(),
+  accent: z.string().default(RTUI_DEFAULTS.accent).volatile(),
+  sidebarContrast: z.string().default(RTUI_DEFAULTS.sidebarContrast).volatile(),
+  font: z.string().default(RTUI_DEFAULTS.font).volatile(),
+  radius: z.string().default(RTUI_DEFAULTS.radius).volatile(),
+  density: z.string().default(RTUI_DEFAULTS.density).volatile(),
+});
+
+function apply(ctx, config) {
+  // 主题的实际应用全部在 client 半段（读 configForms 快照 + overrideTokens），
+  // host 侧无运行时逻辑；Config 导出本身即完成设置登记。
+  void ctx;
+  void config;
 }
 
-export { RTUI_SETTINGS_NAMESPACE, apply };
+export { RTUI_SETTINGS_NAMESPACE, Config, apply };
